@@ -1,5 +1,23 @@
 import mongoose from "mongoose";
 
+const deliveryAddressSchema = new mongoose.Schema(
+  {
+    currlocation: { type: String, trim: true },
+    country: { type: String, trim: true },
+    state: { type: String, trim: true },
+    district: { type: String, trim: true },
+    city: { type: String, trim: true },
+    postoffice: { type: String, trim: true },
+    pin: { type: String, trim: true },
+    landmark: { type: String, trim: true },
+    street: { type: String, trim: true },
+    apartment: { type: String, trim: true },
+    floor: { type: String, trim: true },
+    room: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
 const donationSchema = new mongoose.Schema(
   {
     userId: {
@@ -15,6 +33,11 @@ const donationSchema = new mongoose.Schema(
       type: String,
       required: true,
       default: "self",
+    },
+    donationType: {
+      type: String,
+      enum: ["regular", "maa_durga_pratima"],
+      default: "regular",
     },
     relationName: {
       type: String,
@@ -46,6 +69,24 @@ const donationSchema = new mongoose.Schema(
     date: { type: Date, default: Date.now },
     remarks: { type: String },
     postalAddress: { type: String, required: true },
+    // Structured copy used for filtering/reporting. `postalAddress` remains
+    // available for existing receipts and historical integrations.
+    deliveryAddress: {
+      type: deliveryAddressSchema,
+      default: undefined,
+    },
+    mahaprasadFulfillment: {
+      mode: {
+        type: String,
+        enum: ["none", "collection", "courier"],
+        default: undefined,
+      },
+      type: {
+        type: String,
+        enum: ["none", "halwa", "packet"],
+        default: undefined,
+      },
+    },
     paymentStatus: {
       // Keep only one paymentStatus
       type: String,

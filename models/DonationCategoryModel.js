@@ -25,6 +25,13 @@ const donationCategorySchema = new mongoose.Schema(
       unique: true,
       trim: true,
     },
+    categoryCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      lowercase: true,
+    },
     rate: {
       type: Number,
       required: true,
@@ -72,6 +79,24 @@ const donationCategorySchema = new mongoose.Schema(
         isDynamic: false,
         minvalue: 0,
       },
+    },
+    amountType: {
+      type: String,
+      enum: ["fixed", "minimum"],
+      default: "fixed",
+    },
+    availableFor: {
+      type: [String],
+      enum: ["self", "child"],
+      default: undefined,
+    },
+    isSpecial: {
+      type: Boolean,
+      default: false,
+    },
+    showInRegularDonation: {
+      type: Boolean,
+      default: true,
     },
   },
   { timestamps: true }

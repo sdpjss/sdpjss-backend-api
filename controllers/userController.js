@@ -12,10 +12,13 @@ import jobOpeningModel from "../models/JobOpeningModel.js";
 import staffRequirementModel from "../models/StaffRequirementModel.js";
 import advertisementModel from "../models/AdvertisementModel.js";
 import donationModel from "../models/DonationModel.js";
+import donationCategoryModel from "../models/DonationCategoryModel.js";
 import guestDonationModel from "../models/GuestDonationModel.js";
 import featureModel from "../models/FeatureModel.js";
 import sendEmail from "../services/emailServer.js";
-import updateOnlineDonationsWithPrasad from "./helpers/prasadCalculator.js";
+import updateOnlineDonationsWithPrasad, {
+  applyMahaprasadFulfillment,
+} from "./helpers/prasadCalculator.js";
 
 // Initialize Razorpay
 const razorpayInstance = new razorpay({
@@ -2892,7 +2895,11 @@ const getFinancialYear = () => {
   return `${startYearShort}-${endYearShort}`;
 };
 
-const generateReceiptId = async (method, modelName = "donation") => {
+const generateReceiptId = async (
+  method,
+  modelName = "donation",
+  receiptIdentifier = ""
+) => {
   // 1. Determine method code
   let methodCode;
   if (method === "Cash") {
@@ -2910,7 +2917,8 @@ const generateReceiptId = async (method, modelName = "donation") => {
 
   // 3. Select the correct model and create the prefix
   let Model;
-  let prefix = `SDP/${methodCode}`;
+  const receiptCode = `${methodCode}${receiptIdentifier}`;
+  const prefix = `SDP/${receiptCode}`;
 
   if (modelName === "donation") {
     Model = donationModel;
@@ -2922,7 +2930,7 @@ const generateReceiptId = async (method, modelName = "donation") => {
 
   try {
     // 4. Find the last donation with the same prefix and financial year
-    const regex = new RegExp(`^SDP\\/${methodCode}[0-9]+\\/${financialYear}$`);
+    const regex = new RegExp(`^SDP\\/${receiptCode}[0-9]+\\/${financialYear}$`);
     const lastDonation = await Model.findOne(
       { receiptId: { $regex: regex } },
       { receiptId: 1 }
@@ -2935,15 +2943,22 @@ const generateReceiptId = async (method, modelName = "donation") => {
     if (lastDonation && lastDonation.receiptId) {
       // The receipt format is SDP/C0001/25-26, so we need to split by '/'
       const parts = lastDonation.receiptId.split("/");
-      const lastNumberString = parts[1].substring(methodCode.length);
+      const lastNumberString = parts[1].substring(receiptCode.length);
       const lastNumber = parseInt(lastNumberString, 10);
       if (!isNaN(lastNumber)) {
         nextNumber = lastNumber + 1;
       }
     }
 
-    // 6. Format the new receipt ID with 5-digit padding and financial year
-    const paddedNumber = nextNumber.toString().padStart(5, "0");
+    if (receiptIdentifier && nextNumber > 9999) {
+      throw new Error(
+        `Receipt sequence exhausted for ${receiptCode}/${financialYear}.`
+      );
+    }
+
+    // Pratima receipts have four sequence digits. Existing formats are kept.
+    const sequenceDigits = receiptIdentifier ? 4 : 5;
+    const paddedNumber = nextNumber.toString().padStart(sequenceDigits, "0");
     const newReceiptId = `${prefix}${paddedNumber}/${financialYear}`;
 
     return newReceiptId;
@@ -2952,6 +2967,10 @@ const generateReceiptId = async (method, modelName = "donation") => {
     throw new Error("Failed to generate unique receipt ID.", { cause: error });
   }
 };
+
+const isPratimaDonationRecord = (donation) =>
+  donation?.donationType === "maa_durga_pratima" ||
+  donation?.list?.some((item) => item.category === "Maa Durga Pratima");
 
 // API to create a donation order (initiate payment)
 // controllers/donationController.js
@@ -2972,6 +2991,8 @@ const createDonationOrder = async (req, res) => {
       courierCharge,
       remarks,
       postalAddress,
+      deliveryAddress,
+      mahaprasadFulfillment,
       donatedFor, // This ID is now provided by the frontend (can be user's or child's)
       donatedAs,
       relationName,
@@ -2980,7 +3001,8 @@ const createDonationOrder = async (req, res) => {
     // --- All validation remains the same ---
     if (
       !userId ||
-      !list ||
+      !Array.isArray(list) ||
+      list.length === 0 ||
       !amount ||
       !method ||
       courierCharge === undefined ||
@@ -3003,22 +3025,208 @@ const createDonationOrder = async (req, res) => {
       return res.json({ success: false, message: "Invalid payment method" });
     }
 
+    const courierUnavailableLocations = new Set([
+      "in_manpur",
+      "in_gaya_outside_manpur",
+    ]);
+
+    const selectedCategoryNames = list
+      .map((item) => item.category?.trim())
+      .filter(Boolean);
+    const selectedCategories = await donationCategoryModel
+      .find({ categoryName: { $in: selectedCategoryNames } })
+      .select("categoryName categoryCode packet dynamic availableFor")
+      .lean();
+    if (
+      new Set(selectedCategoryNames).size !== selectedCategories.length
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "One or more donation categories are invalid.",
+      });
+    }
+    const unavailableCategory = selectedCategories.find(
+      (category) =>
+        category.availableFor?.length > 0 &&
+        !category.availableFor.includes(donatedAs)
+    );
+    if (unavailableCategory) {
+      return res.status(400).json({
+        success: false,
+        message: `${unavailableCategory.categoryName} is not available for this donation type.`,
+      });
+    }
+    const categoryByName = new Map(
+      selectedCategories.map((category) => [category.categoryName, category])
+    );
+    const combinedDonationAmount = list.reduce(
+      (sum, item) => sum + (Number(item.amount) || 0),
+      0
+    );
+    const isMaaDurgaPratimaDonation =
+      selectedCategories.length === 1 &&
+      selectedCategories[0].categoryCode === "maa_durga_pratima";
+    const invalidPratimaQuantityItem = list.find((item) => {
+      const category = categoryByName.get(item.category?.trim());
+      const quantity = Number(item.number);
+      return (
+        category?.categoryCode === "maa_durga_pratima" &&
+        (!Number.isInteger(quantity) || quantity < 1)
+      );
+    });
+    if (invalidPratimaQuantityItem) {
+      return res.status(400).json({
+        success: false,
+        message: "Maa Durga Pratima quantity must be a positive whole number.",
+      });
+    }
+    const belowMinimumItem = list.find((item) => {
+      const category = categoryByName.get(item.category?.trim());
+      const minimumMultiplier =
+        category?.categoryCode === "maa_durga_pratima"
+          ? Number(item.number)
+          : 1;
+      return (
+        category?.dynamic?.isDynamic &&
+        (!Number.isFinite(Number(item.amount)) ||
+          Number(item.amount) <
+            Number(category.dynamic.minvalue || 0) * minimumMultiplier)
+      );
+    });
+    if (belowMinimumItem) {
+      const category = categoryByName.get(belowMinimumItem.category.trim());
+      const minimumAmount =
+        Number(category.dynamic.minvalue || 0) *
+        (category.categoryCode === "maa_durga_pratima"
+          ? Number(belowMinimumItem.number)
+          : 1);
+      return res.status(400).json({
+        success: false,
+        message: `${category.categoryName} requires a minimum donation of ₹${minimumAmount}.`,
+      });
+    }
+    if (isMaaDurgaPratimaDonation) {
+      const pratimaItem = list[0];
+      const paymentAmount = Number(amount);
+      const minimumPaymentAmount =
+        Number(selectedCategories[0].dynamic?.minvalue || 0) *
+        Number(pratimaItem.number);
+      if (
+        !Number.isFinite(paymentAmount) ||
+        Math.abs(paymentAmount - combinedDonationAmount) > 0.01
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Pratima donation total does not match the entered amount.",
+        });
+      }
+      if (paymentAmount < minimumPaymentAmount) {
+        return res.status(400).json({
+          success: false,
+          message: `Maa Durga Pratima requires a minimum payment of ₹${minimumPaymentAmount}.`,
+        });
+      }
+    }
+    const hasPacketEligibleCategory = selectedCategories.some(
+      (category) =>
+        category.packet ||
+        category.categoryName.toLowerCase().includes("professional")
+    );
+    let normalizedFulfillment;
+    if (donatedAs === "child" || isMaaDurgaPratimaDonation) {
+      normalizedFulfillment = { mode: "none", type: "none" };
+    } else {
+      const requestedMode =
+        mahaprasadFulfillment?.mode ||
+        (deliveryAddress ? "courier" : "collection");
+
+      if (!["collection", "courier"].includes(requestedMode)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid Mahaprasad fulfilment mode",
+        });
+      }
+
+      if (requestedMode === "courier") {
+        if (combinedDonationAmount < 1210) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Courier delivery requires a combined donation of at least ₹1,210.",
+          });
+        }
+        if (!deliveryAddress?.currlocation) {
+          return res.status(400).json({
+            success: false,
+            message: "A delivery address is required for courier fulfilment.",
+          });
+        }
+        if (
+          courierUnavailableLocations.has(
+            deliveryAddress.currlocation.trim()
+          )
+        ) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Courier service is not available in Manpur or in Gaya outside Manpur. Please collect Mahaprasad from Durga Sthan.",
+          });
+        }
+        normalizedFulfillment = { mode: "courier", type: "packet" };
+      } else {
+        const requestedType =
+          mahaprasadFulfillment?.type === "packet" ? "packet" : "halwa";
+        if (requestedType === "packet" && !hasPacketEligibleCategory) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Packet collection is not available for the selected donation categories.",
+          });
+        }
+        normalizedFulfillment = {
+          mode: "collection",
+          type: requestedType,
+        };
+      }
+    }
+
+    const normalizedList = list.map((item) => ({ ...item }));
+    applyMahaprasadFulfillment({
+      donatedAs,
+      list: normalizedList,
+      mahaprasadFulfillment: normalizedFulfillment,
+    });
+    const normalizedCourierCharge =
+      normalizedFulfillment.mode === "courier" ? courierCharge : 0;
+    const normalizedDeliveryAddress =
+      normalizedFulfillment.mode === "courier" ? deliveryAddress : undefined;
+
     // --- The child creation/update logic has been REMOVED from here ---
 
     if (method === "Cash") {
-      const receiptId = await generateReceiptId(method);
+      const donationType = isMaaDurgaPratimaDonation
+        ? "maa_durga_pratima"
+        : "regular";
+      const receiptId = await generateReceiptId(
+        method,
+        "donation",
+        isMaaDurgaPratimaDonation ? "P" : ""
+      );
       const donation = await donationModel.create({
         userId,
-        list,
+        list: normalizedList,
         amount,
         method,
-        courierCharge,
+        courierCharge: normalizedCourierCharge,
         remarks,
         transactionId: `CASH_${Date.now()}`,
         paymentStatus: "completed",
         postalAddress,
+        deliveryAddress: normalizedDeliveryAddress,
+        mahaprasadFulfillment: normalizedFulfillment,
         receiptId,
         donatedAs,
+        donationType,
         donatedFor, // Directly use the ID provided by the frontend
         relationName: relationName || "",
       });
@@ -3045,15 +3253,20 @@ const createDonationOrder = async (req, res) => {
 
     const tempDonation = await donationModel.create({
       userId,
-      list,
+      list: normalizedList,
       amount,
       method,
-      courierCharge,
+      courierCharge: normalizedCourierCharge,
       remarks,
       razorpayOrderId: razorpayOrder.id,
       paymentStatus: "pending",
       postalAddress,
+      deliveryAddress: normalizedDeliveryAddress,
+      mahaprasadFulfillment: normalizedFulfillment,
       donatedAs,
+      donationType: isMaaDurgaPratimaDonation
+        ? "maa_durga_pratima"
+        : "regular",
       donatedFor, // Directly use the ID provided by the frontend
       relationName: relationName || "",
     });
@@ -3121,7 +3334,11 @@ const verifyDonationPayment = async (req, res) => {
         .json({ success: false, message: "Donation record not found" });
     }
 
-    const receiptId = await generateReceiptId("Online"); // Generate receipt ID for online payment
+    const receiptId = await generateReceiptId(
+      "Online",
+      "donation",
+      isPratimaDonationRecord(donationToUpdate) ? "P" : ""
+    );
 
     // Update the donation record
     const updatedDonation = await donationModel
@@ -3570,7 +3787,11 @@ export const reconcileSingleDonation = async (req, res) => {
 
     if (capturedPayment) {
       // 5. Payment was successful! Update your database.
-      const receiptId = await generateReceiptId("Online");
+      const receiptId = await generateReceiptId(
+        "Online",
+        "donation",
+        isPratimaDonationRecord(donation) ? "P" : ""
+      );
 
       await donationModel.findByIdAndUpdate(donation._id, {
         paymentStatus: "completed",

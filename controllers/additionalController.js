@@ -725,7 +725,13 @@ export const processEditAndReplace = async (req, res) => {
     const Model = isGuestDonation ? guestDonationModel : donationModel;
     const newReceiptId = await generateReceiptId(
       finalPaymentMethod,
-      Model.modelName.toLowerCase()
+      Model.modelName.toLowerCase(),
+      originalDonation.donationType === "maa_durga_pratima" ||
+        originalDonation.list?.some(
+          (item) => item.category === "Maa Durga Pratima"
+        )
+        ? "P"
+        : ""
     );
 
     const originalData = originalDonation.toObject();

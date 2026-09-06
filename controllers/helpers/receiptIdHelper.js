@@ -33,14 +33,19 @@ const getFinancialYear = () => {
 
 /**
  * Generates a unique receipt ID based on payment method and model.
- * The format is SDP/[PaymentMethod][SequenceNumber]/[FinancialYear]
- * e.g., SDP/C00001/25-26
+ * The format is SDP/[PaymentMethod][Identifier][SequenceNumber]/[FinancialYear]
+ * e.g., SDP/C0001/25-26 or SDP/OP0001/25-26 for a Pratima donation
  *
  * @param {string} method The payment method ("Cash", "Online", "QR Code").
  * @param {string} [modelName="donation"] The model name ("donation" or "guestdonation").
+ * @param {string} [receiptIdentifier=""] Optional donation identifier such as "P" for Pratima.
  * @returns {Promise<string>} The new unique receipt ID.
  */
-export const generateReceiptId = async (method, modelName = "donation") => {
+export const generateReceiptId = async (
+  method,
+  modelName = "donation",
+  receiptIdentifier = ""
+) => {
   console.log("In generate Receipt: ", method);
 
   // 1. Determine method code
@@ -60,7 +65,8 @@ export const generateReceiptId = async (method, modelName = "donation") => {
 
   // 3. Select the correct model and create the prefix
   let Model;
-  let prefix = `SDP/${methodCode}`;
+  const receiptCode = `${methodCode}${receiptIdentifier}`;
+  const prefix = `SDP/${receiptCode}`;
 
   if (modelName === "donation") {
     Model = donationModel;
@@ -72,7 +78,7 @@ export const generateReceiptId = async (method, modelName = "donation") => {
 
   try {
     // 4. Find the last donation with the same prefix and financial year
-    const regex = new RegExp(`^SDP\\/${methodCode}[0-9]+\\/${financialYear}$`);
+    const regex = new RegExp(`^SDP\\/${receiptCode}[0-9]+\\/${financialYear}$`);
     const lastDonation = await Model.findOne(
       { receiptId: { $regex: regex } },
       { receiptId: 1 }
@@ -85,14 +91,20 @@ export const generateReceiptId = async (method, modelName = "donation") => {
     if (lastDonation && lastDonation.receiptId) {
       // The receipt format is SDP/C0001/25-26, so we need to split by '/'
       const parts = lastDonation.receiptId.split("/");
-      const lastNumberString = parts[1].substring(methodCode.length);
+      const lastNumberString = parts[1].substring(receiptCode.length);
       const lastNumber = parseInt(lastNumberString, 10);
       if (!isNaN(lastNumber)) {
         nextNumber = lastNumber + 1;
       }
     }
 
-    // 6. Format the new receipt ID with 5-digit padding and financial year
+    if (receiptIdentifier && nextNumber > 9999) {
+      throw new Error(
+        `Receipt sequence exhausted for ${receiptCode}/${financialYear}.`
+      );
+    }
+
+    // Pratima and existing helper-generated receipts use four digits.
     const paddedNumber = nextNumber.toString().padStart(4, "0");
     const newReceiptId = `${prefix}${paddedNumber}/${financialYear}`;
 
