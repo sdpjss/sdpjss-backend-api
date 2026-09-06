@@ -14,8 +14,8 @@ import todoRouter from "./routes/todoRoute.js";
 //app config
 const app = express();
 const port = process.env.PORT || 4000;
-connectDB();
-connectCloudinary();
+await connectDB();
+await connectCloudinary();
 
 // CORS configuration with whitelisted domains
 const allowedOrigins = process.env.ALLOWED_CORS_ORIGINS;
