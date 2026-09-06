@@ -1,5 +1,22 @@
 import mongoose from "mongoose";
 
+const yearlyRateSchema = new mongoose.Schema(
+  {
+    year: {
+      type: Number,
+      required: true,
+      min: 1900,
+      max: 9999,
+    },
+    rate: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+  },
+  { _id: false }
+);
+
 const donationCategorySchema = new mongoose.Schema(
   {
     categoryName: {
@@ -12,6 +29,25 @@ const donationCategorySchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 0,
+    },
+    // `rate` is retained as a compatibility value for older records and
+    // consumers. New changes are recorded here, one entry per calendar year.
+    yearlyRates: {
+      type: [yearlyRateSchema],
+      default: [],
+      validate: {
+        validator: (rates) =>
+          new Set(rates.map(({ year }) => year)).size === rates.length,
+        message: "Only one base rate can be configured for a year",
+      },
+    },
+    yearlyRatesInitialized: {
+      type: Boolean,
+      default: false,
+    },
+    disabledRateYears: {
+      type: [Number],
+      default: [],
     },
     weight: {
       type: Number,

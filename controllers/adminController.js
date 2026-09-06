@@ -8,6 +8,10 @@ import advertisementModel from "../models/AdvertisementModel.js";
 import noticeModel from "../models/NoticeModel.js";
 import donationModel from "../models/DonationModel.js";
 import donationCategoryModel from "../models/DonationCategoryModel.js";
+import {
+  LEGACY_COURIER_CHARGE_YEAR,
+  LEGACY_DONATION_RATE_YEAR,
+} from "../config/donationRates.js";
 import courierChargeModel from "../models/CourierChargesModel.js";
 
 import adminModel from "../models/AdminModel.js";
@@ -866,13 +870,93 @@ const deleteNotice = async (req, res) => {
   }
 };
 
-// Get all categories
+const parseRateYear = (value, defaultYear = new Date().getFullYear()) => {
+  const year = value === undefined || value === "" ? defaultYear : Number(value);
+  const currentYear = new Date().getFullYear();
+
+  if (
+    !Number.isInteger(year) ||
+    year < LEGACY_DONATION_RATE_YEAR ||
+    year > currentYear
+  ) {
+    return null;
+  }
+
+  return year;
+};
+
+const parseNonNegativeNumber = (value) => {
+  if (value === "" || value === null || value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+};
+
+const resolveCategoryRate = (category, requestedYear) => {
+  const yearlyRates = [...(category.yearlyRates || [])].sort(
+    (a, b) => a.year - b.year
+  );
+  const isDisabledForRequestedYear = (category.disabledRateYears || []).includes(
+    requestedYear
+  );
+  const exactRate = yearlyRates.find(({ year }) => year === requestedYear);
+  const previousRate = [...yearlyRates]
+    .reverse()
+    .find(({ year }) => year <= requestedYear);
+  const resolvedRate = isDisabledForRequestedYear
+    ? null
+    : exactRate || previousRate;
+
+  return {
+    ...category,
+    yearlyRates,
+    rate: resolvedRate?.rate ?? null,
+    rateYear: resolvedRate?.year ?? null,
+    requestedRateYear: requestedYear,
+    hasRateForRequestedYear: Boolean(exactRate),
+    isDisabledForRequestedYear,
+    isRateFallback: Boolean(resolvedRate && resolvedRate.year !== requestedYear),
+  };
+};
+
+const upsertYearlyRate = (yearlyRates, year, rate) => {
+  const rates = (yearlyRates || []).map(({ year: itemYear, rate: itemRate }) => ({
+    year: itemYear,
+    rate: itemRate,
+  }));
+  const existingIndex = rates.findIndex((item) => item.year === year);
+
+  if (existingIndex >= 0) rates[existingIndex].rate = rate;
+  else rates.push({ year, rate });
+
+  return rates.sort((a, b) => a.year - b.year);
+};
+
+// Get all categories. The returned `rate` is resolved for the requested year,
+// while `yearlyRates` contains the complete history for management screens.
 const getAllCategories = async (req, res) => {
   try {
-    const categories = await donationCategoryModel.find({ isActive: true });
+    const requestedYear = parseRateYear(req.query.year);
+    if (requestedYear === null) {
+      return res.status(400).json({
+        success: false,
+        message: `Rate year must be between ${LEGACY_DONATION_RATE_YEAR} and ${new Date().getFullYear()}`,
+      });
+    }
+
+    const categoryDocuments = await donationCategoryModel
+      .find({ isActive: true })
+      .lean();
+    const resolvedCategories = categoryDocuments.map((category) =>
+      resolveCategoryRate(category, requestedYear)
+    );
+    const categories =
+      req.query.includeUnconfigured === "true"
+        ? resolvedCategories
+        : resolvedCategories.filter(({ rate }) => rate !== null);
     res.json({
       success: true,
       categories,
+      rateYear: requestedYear,
     });
   } catch (error) {
     console.log(error);
@@ -883,14 +967,29 @@ const getAllCategories = async (req, res) => {
 // Add new category
 const addCategory = async (req, res) => {
   try {
-    const { categoryName, rate, weight, packet, description, dynamic } =
-      req.body;
+    const {
+      categoryName,
+      rate,
+      rateYear,
+      weight,
+      packet,
+      description,
+      dynamic,
+    } = req.body;
+    const parsedRate = parseNonNegativeNumber(rate);
+    const parsedWeight = parseNonNegativeNumber(weight);
+    const parsedRateYear = parseRateYear(rateYear);
 
     // Validate required fields
-    if (!categoryName || !rate || !(weight || packet)) {
-      return res.json({
+    if (
+      !categoryName?.trim() ||
+      parsedRate === null ||
+      parsedRateYear === null ||
+      (parsedWeight === null && !packet)
+    ) {
+      return res.status(400).json({
         success: false,
-        message: "Category name, rate, and weight are required",
+        message: "Category name, rate year, rate, and weight/packet are required",
       });
     }
     if (
@@ -919,8 +1018,10 @@ const addCategory = async (req, res) => {
     // Create new category
     const newCategory = new donationCategoryModel({
       categoryName: categoryName.trim(),
-      rate: Number(rate),
-      weight: Number(weight),
+      rate: parsedRate,
+      yearlyRates: [{ year: parsedRateYear, rate: parsedRate }],
+      yearlyRatesInitialized: true,
+      weight: parsedWeight ?? 0,
       packet: Boolean(packet),
       description: description?.trim() || "",
       dynamic: {
@@ -946,14 +1047,29 @@ const addCategory = async (req, res) => {
 const editCategory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { categoryName, rate, weight, packet, description, dynamic } =
-      req.body;
+    const {
+      categoryName,
+      rate,
+      rateYear,
+      weight,
+      packet,
+      description,
+      dynamic,
+    } = req.body;
+    const parsedRate = parseNonNegativeNumber(rate);
+    const parsedWeight = parseNonNegativeNumber(weight);
+    const parsedRateYear = parseRateYear(rateYear);
 
     // Validate required fields
-    if (!categoryName || !rate || !(weight || packet)) {
-      return res.json({
+    if (
+      !categoryName?.trim() ||
+      parsedRate === null ||
+      parsedRateYear === null ||
+      (parsedWeight === null && !packet)
+    ) {
+      return res.status(400).json({
         success: false,
-        message: "Category name, rate, and weight/packet are required",
+        message: "Category name, rate year, rate, and weight/packet are required",
       });
     }
 
@@ -991,13 +1107,25 @@ const editCategory = async (req, res) => {
       });
     }
 
-    // Update category
+    const yearlyRates = upsertYearlyRate(
+      category.yearlyRates,
+      parsedRateYear,
+      parsedRate
+    );
+    const latestRate = yearlyRates[yearlyRates.length - 1].rate;
+
+    // Update category and preserve all previously configured annual rates.
     const updatedCategory = await donationCategoryModel.findByIdAndUpdate(
       id,
       {
         categoryName: categoryName.trim(),
-        rate: Number(rate),
-        weight: Number(weight),
+        rate: latestRate,
+        yearlyRates,
+        yearlyRatesInitialized: true,
+        disabledRateYears: (category.disabledRateYears || []).filter(
+          (year) => year !== parsedRateYear
+        ),
+        weight: parsedWeight ?? 0,
         packet: Boolean(packet),
         description: description?.trim() || "",
         dynamic: {
@@ -1011,7 +1139,10 @@ const editCategory = async (req, res) => {
     res.json({
       success: true,
       message: "Category updated successfully",
-      category: updatedCategory,
+      category: resolveCategoryRate(
+        updatedCategory.toObject(),
+        parsedRateYear
+      ),
     });
   } catch (error) {
     console.log(error);
@@ -1019,10 +1150,17 @@ const editCategory = async (req, res) => {
   }
 };
 
-// Delete category (soft delete)
+// Delete only the category rate configured for a specific year.
 const deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
+    const requestedYear = parseRateYear(req.query.year);
+    if (requestedYear === null) {
+      return res.status(400).json({
+        success: false,
+        message: `Rate year must be between ${LEGACY_DONATION_RATE_YEAR} and ${new Date().getFullYear()}`,
+      });
+    }
 
     // Check if category exists
     const category = await donationCategoryModel.findById(id);
@@ -1033,12 +1171,30 @@ const deleteCategory = async (req, res) => {
       });
     }
 
-    // Soft delete by setting isActive to false
-    await donationCategoryModel.findByIdAndUpdate(id, { isActive: false });
+    const yearlyRates = (category.yearlyRates || []).map(({ year, rate }) => ({
+      year,
+      rate,
+    }));
+    const remainingRates = yearlyRates
+      .filter(({ year }) => year !== requestedYear)
+      .sort((a, b) => a.year - b.year);
+    const update = {
+      yearlyRates: remainingRates,
+      yearlyRatesInitialized: true,
+      disabledRateYears: [
+        ...new Set([...(category.disabledRateYears || []), requestedYear]),
+      ],
+    };
+
+    if (remainingRates.length > 0) {
+      update.rate = remainingRates[remainingRates.length - 1].rate;
+    }
+
+    await donationCategoryModel.findByIdAndUpdate(id, update);
 
     res.json({
       success: true,
-      message: "Category deleted successfully",
+      message: `Category marked as not applicable for ${requestedYear}`,
     });
   } catch (error) {
     console.log(error);
@@ -1050,8 +1206,15 @@ const deleteCategory = async (req, res) => {
 const getCategory = async (req, res) => {
   try {
     const { id } = req.params;
+    const requestedYear = parseRateYear(req.query.year);
+    if (requestedYear === null) {
+      return res.status(400).json({
+        success: false,
+        message: `Rate year must be between ${LEGACY_DONATION_RATE_YEAR} and ${new Date().getFullYear()}`,
+      });
+    }
 
-    const category = await donationCategoryModel.findById(id);
+    const category = await donationCategoryModel.findById(id).lean();
     if (!category) {
       return res.json({
         success: false,
@@ -1061,7 +1224,7 @@ const getCategory = async (req, res) => {
 
     res.json({
       success: true,
-      category,
+      category: resolveCategoryRate(category, requestedYear),
     });
   } catch (error) {
     console.log(error);
@@ -1116,17 +1279,78 @@ const getAvailableYears = async (req, res) => {
 
 // ========== COURIER CHARGE CONTROLLERS ==========
 
+const resolveCourierChargeAmount = (courierCharge, requestedYear) => {
+  const yearlyAmounts = [...(courierCharge.yearlyAmounts || [])].sort(
+    (a, b) => a.year - b.year
+  );
+  const isDisabledForRequestedYear = (
+    courierCharge.disabledAmountYears || []
+  ).includes(requestedYear);
+  const exactAmount = yearlyAmounts.find(({ year }) => year === requestedYear);
+  const previousAmount = [...yearlyAmounts]
+    .reverse()
+    .find(({ year }) => year <= requestedYear);
+  const resolvedAmount = isDisabledForRequestedYear
+    ? null
+    : exactAmount || previousAmount;
+
+  return {
+    ...courierCharge,
+    yearlyAmounts,
+    amount: resolvedAmount?.amount ?? null,
+    amountYear: resolvedAmount?.year ?? null,
+    requestedAmountYear: requestedYear,
+    hasAmountForRequestedYear: Boolean(exactAmount),
+    isDisabledForRequestedYear,
+    isAmountFallback: Boolean(
+      resolvedAmount && resolvedAmount.year !== requestedYear
+    ),
+  };
+};
+
+const upsertYearlyAmount = (yearlyAmounts, year, amount) => {
+  const amounts = (yearlyAmounts || []).map(
+    ({ year: itemYear, amount: itemAmount }) => ({
+      year: itemYear,
+      amount: itemAmount,
+    })
+  );
+  const existingIndex = amounts.findIndex((item) => item.year === year);
+
+  if (existingIndex >= 0) amounts[existingIndex].amount = amount;
+  else amounts.push({ year, amount });
+
+  return amounts.sort((a, b) => a.year - b.year);
+};
+
 // Get all courier charges
 const getCourierCharges = async (req, res) => {
   try {
-    const courierCharges = await courierChargeModel
+    const requestedYear = parseRateYear(req.query.year);
+    if (requestedYear === null) {
+      return res.status(400).json({
+        success: false,
+        message: `Courier charge year must be between ${LEGACY_COURIER_CHARGE_YEAR} and ${new Date().getFullYear()}`,
+      });
+    }
+
+    const courierChargeDocuments = await courierChargeModel
       .find()
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
+    const resolvedCourierCharges = courierChargeDocuments.map((courierCharge) =>
+      resolveCourierChargeAmount(courierCharge, requestedYear)
+    );
+    const courierCharges =
+      req.query.includeUnconfigured === "true"
+        ? resolvedCourierCharges
+        : resolvedCourierCharges.filter(({ amount }) => amount !== null);
 
     res.json({
       success: true,
       message: "Courier charges fetched successfully",
       courierCharges,
+      amountYear: requestedYear,
     });
   } catch (error) {
     console.error("Error fetching courier charges:", error);
@@ -1141,20 +1365,15 @@ const getCourierCharges = async (req, res) => {
 // Create new courier charge
 const createCourierCharge = async (req, res) => {
   try {
-    const { region, amount } = req.body;
+    const { region, amount, amountYear } = req.body;
+    const parsedAmount = parseNonNegativeNumber(amount);
+    const parsedAmountYear = parseRateYear(amountYear);
 
     // Validation
-    if (!region || !amount) {
+    if (!region || parsedAmount === null || parsedAmountYear === null) {
       return res.status(400).json({
         success: false,
-        message: "Region and amount are required",
-      });
-    }
-
-    if (amount < 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Amount must be a positive number",
+        message: "Region, amount year, and a valid amount are required",
       });
     }
 
@@ -1185,7 +1404,9 @@ const createCourierCharge = async (req, res) => {
     // Create new courier charge
     const newCourierCharge = new courierChargeModel({
       region,
-      amount: Number(amount),
+      amount: parsedAmount,
+      yearlyAmounts: [{ year: parsedAmountYear, amount: parsedAmount }],
+      yearlyAmountsInitialized: true,
     });
 
     await newCourierCharge.save();
@@ -1209,20 +1430,15 @@ const createCourierCharge = async (req, res) => {
 const updateCourierCharge = async (req, res) => {
   try {
     const { id } = req.params;
-    const { region, amount } = req.body;
+    const { region, amount, amountYear } = req.body;
+    const parsedAmount = parseNonNegativeNumber(amount);
+    const parsedAmountYear = parseRateYear(amountYear);
 
     // Validation
-    if (!region || !amount) {
+    if (!region || parsedAmount === null || parsedAmountYear === null) {
       return res.status(400).json({
         success: false,
-        message: "Region and amount are required",
-      });
-    }
-
-    if (amount < 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Amount must be a positive number",
+        message: "Region, amount year, and a valid amount are required",
       });
     }
 
@@ -1263,12 +1479,24 @@ const updateCourierCharge = async (req, res) => {
       });
     }
 
-    // Update courier charge
+    const yearlyAmounts = upsertYearlyAmount(
+      courierCharge.yearlyAmounts,
+      parsedAmountYear,
+      parsedAmount
+    );
+    const latestAmount = yearlyAmounts[yearlyAmounts.length - 1].amount;
+
+    // Update courier charge while preserving previously configured years.
     const updatedCourierCharge = await courierChargeModel.findByIdAndUpdate(
       id,
       {
         region,
-        amount: Number(amount),
+        amount: latestAmount,
+        yearlyAmounts,
+        yearlyAmountsInitialized: true,
+        disabledAmountYears: (courierCharge.disabledAmountYears || []).filter(
+          (year) => year !== parsedAmountYear
+        ),
         updatedAt: new Date(),
       },
       { new: true }
@@ -1277,7 +1505,10 @@ const updateCourierCharge = async (req, res) => {
     res.json({
       success: true,
       message: "Courier charge updated successfully",
-      courierCharge: updatedCourierCharge,
+      courierCharge: resolveCourierChargeAmount(
+        updatedCourierCharge.toObject(),
+        parsedAmountYear
+      ),
     });
   } catch (error) {
     console.error("Error updating courier charge:", error);
@@ -1289,10 +1520,17 @@ const updateCourierCharge = async (req, res) => {
   }
 };
 
-// Delete courier charge
+// Delete only the courier charge configured for a specific year.
 const deleteCourierCharge = async (req, res) => {
   try {
     const { id } = req.params;
+    const requestedYear = parseRateYear(req.query.year);
+    if (requestedYear === null) {
+      return res.status(400).json({
+        success: false,
+        message: `Courier charge year must be between ${LEGACY_COURIER_CHARGE_YEAR} and ${new Date().getFullYear()}`,
+      });
+    }
 
     // Check if courier charge exists
     const courierCharge = await courierChargeModel.findById(id);
@@ -1303,12 +1541,28 @@ const deleteCourierCharge = async (req, res) => {
       });
     }
 
-    // Delete courier charge
-    await courierChargeModel.findByIdAndDelete(id);
+    const yearlyAmounts = (courierCharge.yearlyAmounts || []).map(
+      ({ year, amount }) => ({ year, amount })
+    );
+    const remainingAmounts = yearlyAmounts
+      .filter(({ year }) => year !== requestedYear)
+      .sort((a, b) => a.year - b.year);
+
+    const update = {
+      yearlyAmounts: remainingAmounts,
+      yearlyAmountsInitialized: true,
+      disabledAmountYears: [
+        ...new Set([...(courierCharge.disabledAmountYears || []), requestedYear]),
+      ],
+    };
+    if (remainingAmounts.length > 0) {
+      update.amount = remainingAmounts[remainingAmounts.length - 1].amount;
+    }
+    await courierChargeModel.findByIdAndUpdate(id, update);
 
     res.json({
       success: true,
-      message: "Courier charge deleted successfully",
+      message: `Courier charge marked as not applicable for ${requestedYear}`,
     });
   } catch (error) {
     console.error("Error deleting courier charge:", error);
