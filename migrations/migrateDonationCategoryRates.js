@@ -58,6 +58,28 @@ const migrateDonationCategoryRates = async () => {
       `Updated ${professionalResult.modifiedCount} Professional donation category amount rule(s) to minimum`
     );
   }
+
+  const childEligibleResult = await donationCategoryModel.updateMany(
+    {
+      applicableToChildDonation: { $exists: false },
+      $or: [
+        { categoryName: { $regex: "^voluntary donations?$", $options: "i" } },
+        { availableFor: "child" },
+      ],
+    },
+    { $set: { applicableToChildDonation: true } }
+  );
+
+  await donationCategoryModel.updateMany(
+    { applicableToChildDonation: { $exists: false } },
+    { $set: { applicableToChildDonation: false } }
+  );
+
+  if (childEligibleResult.modifiedCount > 0) {
+    console.log(
+      `Enabled ${childEligibleResult.modifiedCount} existing donation category(s) for child donations`
+    );
+  }
 };
 
 export default migrateDonationCategoryRates;

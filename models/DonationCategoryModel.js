@@ -108,6 +108,10 @@ const donationCategorySchema = new mongoose.Schema(
       enum: ["legacy-v1", "category-v2"],
       default: "legacy-v1",
     },
+    applicableToChildDonation: {
+      type: Boolean,
+      default: false,
+    },
     availableFor: {
       type: [String],
       enum: ["self", "child"],

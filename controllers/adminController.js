@@ -981,6 +981,7 @@ const addCategory = async (req, res) => {
       prasadType = packet ? "packet" : "grams",
       packetsPerUnit = packet ? 1 : 0,
       allowGramAlternativeForInPerson = false,
+      applicableToChildDonation = false,
       configurationVersion,
     } = req.body;
     const parsedRate = parseNonNegativeNumber(rate);
@@ -1045,6 +1046,7 @@ const addCategory = async (req, res) => {
       packetsPerUnit:
         prasadType === "packet" ? Number(packetsPerUnit) : 0,
       allowGramAlternativeForInPerson: allowsGramAlternative,
+      applicableToChildDonation: Boolean(applicableToChildDonation),
       configurationVersion: "category-v2",
       dynamic: {
         isDynamic: resolvedAmountType === "minimum",
@@ -1082,6 +1084,7 @@ const editCategory = async (req, res) => {
       prasadType = packet ? "packet" : "grams",
       packetsPerUnit = packet ? 1 : 0,
       allowGramAlternativeForInPerson = false,
+      applicableToChildDonation = false,
       configurationVersion,
     } = req.body;
     const parsedRate = parseNonNegativeNumber(rate);
@@ -1168,6 +1171,7 @@ const editCategory = async (req, res) => {
       packetsPerUnit:
         prasadType === "packet" ? Number(packetsPerUnit) : 0,
       allowGramAlternativeForInPerson: allowsGramAlternative,
+      applicableToChildDonation: Boolean(applicableToChildDonation),
       configurationVersion: "category-v2",
       dynamic: {
         isDynamic: resolvedAmountType === "minimum",
@@ -1183,7 +1187,9 @@ const editCategory = async (req, res) => {
         (resolvedAmountType === "minimum" && Boolean(minimumAmountPerUnit)) ||
       updatedCategory?.prasadType !== prasadType ||
       updatedCategory?.allowGramAlternativeForInPerson !==
-        allowsGramAlternative
+        allowsGramAlternative ||
+      updatedCategory?.applicableToChildDonation !==
+        Boolean(applicableToChildDonation)
     ) {
       return res.status(500).json({
         success: false,
