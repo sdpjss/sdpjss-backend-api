@@ -3,6 +3,42 @@ import fs from "fs";
 import mongoose from "mongoose";
 import teamMemberModel from "../models/TeamMemberModel.js";
 
+const parseDate = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const validateEffectivePeriod = (fromValue, toValue) => {
+  const effectiveFrom = parseDate(fromValue);
+  const effectiveTo = parseDate(toValue);
+
+  if (!effectiveFrom || (toValue && !effectiveTo)) return null;
+  if (effectiveTo && effectiveTo < effectiveFrom) return null;
+
+  return { effectiveFrom, effectiveTo };
+};
+
+const groupMembersByCategory = (members) => {
+  const groupedMembers = {};
+
+  members.forEach((member) => {
+    if (!groupedMembers[member.category]) groupedMembers[member.category] = [];
+    groupedMembers[member.category].push(member);
+  });
+
+  Object.values(groupedMembers).forEach((categoryMembers) => {
+    categoryMembers.sort(
+      (a, b) =>
+        (a.order ?? 0) - (b.order ?? 0) ||
+        new Date(a.effectiveFrom || a.createdAt) -
+          new Date(b.effectiveFrom || b.createdAt)
+    );
+  });
+
+  return groupedMembers;
+};
+
 // // Configure Cloudinary
 // cloudinary.config({
 //   cloud_name: process.env.CLOUDINARY_NAME,
@@ -38,25 +74,31 @@ const extractPublicId = (url) => {
 // Get all active team members by category (Public route) -- DONE
 export const getTeamMembers = async (req, res) => {
   try {
-    const teamMembers = await teamMemberModel.find({ isActive: true }).sort({
-      category: 1,
+    const teamMembers = await teamMemberModel.find({}).sort({
       order: 1,
       createdAt: 1,
     });
 
-    // Group by category for easier frontend rendering
-    const groupedMembers = teamMembers.reduce((acc, member) => {
-      if (!acc[member.category]) {
-        acc[member.category] = [];
-      }
-      acc[member.category].push(member);
-      return acc;
-    }, {});
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    const members = teamMembers.map((member) => member.toObject());
+    const currentMembers = members.filter((member) => {
+      const effectiveFrom = parseDate(member.effectiveFrom || member.createdAt);
+      const effectiveTo = parseDate(member.effectiveTo);
+      return (
+        member.isActive &&
+        effectiveFrom <= today &&
+        (!effectiveTo || effectiveTo >= today)
+      );
+    });
+    const currentTeam = groupMembersByCategory(currentMembers);
 
     res.status(200).json({
       success: true,
-      teamMembers: groupedMembers,
-      totalMembers: teamMembers.length,
+      currentTeam,
+      teamMembers: currentTeam,
+      totalMembers: currentMembers.length,
     });
   } catch (error) {
     console.error("Error fetching team members:", error);
@@ -70,7 +112,7 @@ export const getTeamMembers = async (req, res) => {
 // Get all team members for admin panel (Admin route) - DONE
 export const getAllTeamMembersForAdmin = async (req, res) => {
   try {
-    const { page = 1, limit = 50, category, status } = req.query;
+    const { page = 1, limit, category, status } = req.query;
 
     // Build filter object
     const filter = {};
@@ -83,15 +125,24 @@ export const getAllTeamMembersForAdmin = async (req, res) => {
 
     const options = {
       page: parseInt(page),
-      limit: parseInt(limit),
-      sort: { category: 1, order: 1, createdAt: -1 },
+      limit: limit ? parseInt(limit) : null,
+      sort: {
+        effectiveTo: -1,
+        effectiveFrom: -1,
+        category: 1,
+        order: 1,
+        createdAt: -1,
+      },
     };
 
-    const teamMembers = await teamMemberModel
-      .find(filter)
-      .sort(options.sort)
-      .limit(options.limit * options.page)
-      .skip((options.page - 1) * options.limit);
+    const query = teamMemberModel.find(filter).sort(options.sort);
+    if (options.limit) {
+      query
+        .limit(options.limit)
+        .skip((options.page - 1) * options.limit);
+    }
+
+    const teamMembers = await query;
 
     const total = await teamMemberModel.countDocuments(filter);
 
@@ -100,9 +151,9 @@ export const getAllTeamMembersForAdmin = async (req, res) => {
       teamMembers,
       pagination: {
         currentPage: options.page,
-        totalPages: Math.ceil(total / options.limit),
+        totalPages: options.limit ? Math.ceil(total / options.limit) : 1,
         totalItems: total,
-        itemsPerPage: options.limit,
+        itemsPerPage: options.limit || total,
       },
     });
   } catch (error) {
@@ -117,15 +168,32 @@ export const getAllTeamMembersForAdmin = async (req, res) => {
 // Add new team member (Admin route) - DONE
 export const addTeamMember = async (req, res) => {
   try {
-    const { name, position, category, isActive } = req.body;
+    const {
+      name,
+      position,
+      category,
+      isActive,
+      effectiveFrom,
+      effectiveTo,
+      order,
+    } = req.body;
     const imageFile = req.file;
 
     // Validation
-    if (!name || !position || !category) {
+    if (!name || !position || !category || !effectiveFrom) {
       if (imageFile) deleteTempFile(imageFile.path);
       return res.json({
         success: false,
-        message: "Name, position, and category are required fields.",
+        message: "Name, position, category, and effective-from date are required fields.",
+      });
+    }
+
+    const effectivePeriod = validateEffectivePeriod(effectiveFrom, effectiveTo);
+    if (!effectivePeriod) {
+      if (imageFile) deleteTempFile(imageFile.path);
+      return res.json({
+        success: false,
+        message: "Enter a valid effective period. The end date cannot be before the start date.",
       });
     }
 
@@ -173,6 +241,9 @@ export const addTeamMember = async (req, res) => {
       category,
       isActive: isActive === "true" || isActive === true,
       image: imageURL,
+      effectiveFrom: effectivePeriod.effectiveFrom,
+      effectiveTo: effectivePeriod.effectiveTo,
+      order: Math.max(0, parseInt(order, 10) || 0),
     });
 
     await newMember.save();
@@ -209,7 +280,15 @@ export const addTeamMember = async (req, res) => {
 export const updateTeamMember = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, position, category, isActive } = req.body;
+    const {
+      name,
+      position,
+      category,
+      isActive,
+      effectiveFrom,
+      effectiveTo,
+      order,
+    } = req.body;
     const imageFile = req.file;
 
     // Validate MongoDB ObjectId
@@ -239,6 +318,26 @@ export const updateTeamMember = async (req, res) => {
     if (category) updateData.category = category;
     if (isActive !== undefined)
       updateData.isActive = isActive === "true" || isActive === true;
+
+    if (effectiveFrom !== undefined || effectiveTo !== undefined) {
+      const effectivePeriod = validateEffectivePeriod(
+        effectiveFrom ?? existingMember.effectiveFrom ?? existingMember.createdAt,
+        effectiveTo !== undefined ? effectiveTo : existingMember.effectiveTo
+      );
+      if (!effectivePeriod) {
+        if (imageFile) deleteTempFile(imageFile.path);
+        return res.json({
+          success: false,
+          message: "Enter a valid effective period. The end date cannot be before the start date.",
+        });
+      }
+      updateData.effectiveFrom = effectivePeriod.effectiveFrom;
+      updateData.effectiveTo = effectivePeriod.effectiveTo;
+    }
+
+    if (order !== undefined) {
+      updateData.order = Math.max(0, parseInt(order, 10) || 0);
+    }
 
     // Validate category if provided
     if (category) {
@@ -302,9 +401,25 @@ export const updateTeamMember = async (req, res) => {
     // Update team member
     const updatedMember = await teamMemberModel.findByIdAndUpdate(
       id,
-      { ...updateData },
-      { new: true }
+      { $set: updateData },
+      { new: true, runValidators: true }
     );
+
+    if (
+      updateData.effectiveFrom &&
+      updatedMember.effectiveFrom?.getTime() !==
+        updateData.effectiveFrom.getTime()
+    ) {
+      throw new Error("The effective-from date was not persisted");
+    }
+
+    if (
+      Object.hasOwn(updateData, "effectiveTo") &&
+      (updatedMember.effectiveTo?.getTime() || null) !==
+        (updateData.effectiveTo?.getTime() || null)
+    ) {
+      throw new Error("The effective-to date was not persisted");
+    }
 
     res.json({
       success: true,

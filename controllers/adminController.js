@@ -953,6 +953,7 @@ const getAllCategories = async (req, res) => {
       req.query.includeUnconfigured === "true"
         ? resolvedCategories
         : resolvedCategories.filter(({ rate }) => rate !== null);
+    res.set("Cache-Control", "no-store");
     res.json({
       success: true,
       categories,
@@ -975,32 +976,45 @@ const addCategory = async (req, res) => {
       packet,
       description,
       dynamic,
+      amountType = dynamic?.isDynamic ? "minimum" : "fixed",
+      minimumAmountPerUnit = false,
+      prasadType = packet ? "packet" : "grams",
+      packetsPerUnit = packet ? 1 : 0,
+      allowGramAlternativeForInPerson = false,
+      configurationVersion,
     } = req.body;
     const parsedRate = parseNonNegativeNumber(rate);
     const parsedWeight = parseNonNegativeNumber(weight);
     const parsedRateYear = parseRateYear(rateYear);
+    const allowsGramAlternative =
+      prasadType === "packet" &&
+      (Boolean(allowGramAlternativeForInPerson) ||
+        categoryName?.trim().toLowerCase().includes("professional"));
+    const resolvedAmountType = categoryName
+      ?.trim()
+      .toLowerCase()
+      .includes("professional")
+      ? "minimum"
+      : amountType;
 
     // Validate required fields
     if (
       !categoryName?.trim() ||
       parsedRate === null ||
       parsedRateYear === null ||
-      (parsedWeight === null && !packet)
+      !["fixed", "minimum"].includes(amountType) ||
+      !["grams", "packet", "none"].includes(prasadType) ||
+      (configurationVersion && configurationVersion !== "category-v2")
     ) {
       return res.status(400).json({
         success: false,
-        message: "Category name, rate year, rate, and weight/packet are required",
+        message: "Category name, rate year, amount, amount type, and Prasad type are required",
       });
     }
-    if (
-      dynamic &&
-      dynamic.isDynamic &&
-      (!dynamic.minvalue || dynamic.minvalue < 0)
-    ) {
-      return res.json({
+    if (prasadType === "packet" && Number(packetsPerUnit) < 1) {
+      return res.status(400).json({
         success: false,
-        message:
-          "For a dynamic category, a minimum value of 0 or more is required.",
+        message: "Packets per unit must be at least 1 for packet categories.",
       });
     }
     // Check if category already exists
@@ -1022,11 +1036,19 @@ const addCategory = async (req, res) => {
       yearlyRates: [{ year: parsedRateYear, rate: parsedRate }],
       yearlyRatesInitialized: true,
       weight: parsedWeight ?? 0,
-      packet: Boolean(packet),
+      packet: prasadType === "packet",
       description: description?.trim() || "",
+      amountType: resolvedAmountType,
+      minimumAmountPerUnit:
+        resolvedAmountType === "minimum" && Boolean(minimumAmountPerUnit),
+      prasadType,
+      packetsPerUnit:
+        prasadType === "packet" ? Number(packetsPerUnit) : 0,
+      allowGramAlternativeForInPerson: allowsGramAlternative,
+      configurationVersion: "category-v2",
       dynamic: {
-        isDynamic: dynamic?.isDynamic || false,
-        minvalue: dynamic?.isDynamic ? Number(dynamic.minvalue) : 0,
+        isDynamic: resolvedAmountType === "minimum",
+        minvalue: resolvedAmountType === "minimum" ? parsedRate : 0,
       },
     });
 
@@ -1055,33 +1077,46 @@ const editCategory = async (req, res) => {
       packet,
       description,
       dynamic,
+      amountType = dynamic?.isDynamic ? "minimum" : "fixed",
+      minimumAmountPerUnit = false,
+      prasadType = packet ? "packet" : "grams",
+      packetsPerUnit = packet ? 1 : 0,
+      allowGramAlternativeForInPerson = false,
+      configurationVersion,
     } = req.body;
     const parsedRate = parseNonNegativeNumber(rate);
     const parsedWeight = parseNonNegativeNumber(weight);
     const parsedRateYear = parseRateYear(rateYear);
+    const allowsGramAlternative =
+      prasadType === "packet" &&
+      (Boolean(allowGramAlternativeForInPerson) ||
+        categoryName?.trim().toLowerCase().includes("professional"));
+    const resolvedAmountType = categoryName
+      ?.trim()
+      .toLowerCase()
+      .includes("professional")
+      ? "minimum"
+      : amountType;
 
     // Validate required fields
     if (
       !categoryName?.trim() ||
       parsedRate === null ||
       parsedRateYear === null ||
-      (parsedWeight === null && !packet)
+      !["fixed", "minimum"].includes(amountType) ||
+      !["grams", "packet", "none"].includes(prasadType) ||
+      (configurationVersion && configurationVersion !== "category-v2")
     ) {
       return res.status(400).json({
         success: false,
-        message: "Category name, rate year, rate, and weight/packet are required",
+        message: "Category name, rate year, amount, amount type, and Prasad type are required",
       });
     }
 
-    if (
-      dynamic &&
-      dynamic.isDynamic &&
-      (!dynamic.minvalue || dynamic.minvalue < 0)
-    ) {
-      return res.json({
+    if (prasadType === "packet" && Number(packetsPerUnit) < 1) {
+      return res.status(400).json({
         success: false,
-        message:
-          "For a dynamic category, a minimum value of 0 or more is required.",
+        message: "Packets per unit must be at least 1 for packet categories.",
       });
     }
 
@@ -1115,32 +1150,53 @@ const editCategory = async (req, res) => {
     const latestRate = yearlyRates[yearlyRates.length - 1].rate;
 
     // Update category and preserve all previously configured annual rates.
-    const updatedCategory = await donationCategoryModel.findByIdAndUpdate(
-      id,
-      {
-        categoryName: categoryName.trim(),
-        rate: latestRate,
-        yearlyRates,
-        yearlyRatesInitialized: true,
-        disabledRateYears: (category.disabledRateYears || []).filter(
-          (year) => year !== parsedRateYear
-        ),
-        weight: parsedWeight ?? 0,
-        packet: Boolean(packet),
-        description: description?.trim() || "",
-        dynamic: {
-          isDynamic: dynamic?.isDynamic || false,
-          minvalue: dynamic?.isDynamic ? Number(dynamic.minvalue) : 0,
-        },
+    category.set({
+      categoryName: categoryName.trim(),
+      rate: latestRate,
+      yearlyRates,
+      yearlyRatesInitialized: true,
+      disabledRateYears: (category.disabledRateYears || []).filter(
+        (year) => year !== parsedRateYear
+      ),
+      weight: parsedWeight ?? 0,
+      packet: prasadType === "packet",
+      description: description?.trim() || "",
+      amountType: resolvedAmountType,
+      minimumAmountPerUnit:
+        resolvedAmountType === "minimum" && Boolean(minimumAmountPerUnit),
+      prasadType,
+      packetsPerUnit:
+        prasadType === "packet" ? Number(packetsPerUnit) : 0,
+      allowGramAlternativeForInPerson: allowsGramAlternative,
+      configurationVersion: "category-v2",
+      dynamic: {
+        isDynamic: resolvedAmountType === "minimum",
+        minvalue: resolvedAmountType === "minimum" ? parsedRate : 0,
       },
-      { new: true }
-    );
+    });
+    await category.save();
+    const updatedCategory = await donationCategoryModel.findById(id).lean();
+    if (
+      updatedCategory?.configurationVersion !== "category-v2" ||
+      updatedCategory?.amountType !== resolvedAmountType ||
+      updatedCategory?.minimumAmountPerUnit !==
+        (resolvedAmountType === "minimum" && Boolean(minimumAmountPerUnit)) ||
+      updatedCategory?.prasadType !== prasadType ||
+      updatedCategory?.allowGramAlternativeForInPerson !==
+        allowsGramAlternative
+    ) {
+      return res.status(500).json({
+        success: false,
+        message:
+          "The category rules could not be confirmed. Restart the updated API and try again.",
+      });
+    }
 
     res.json({
       success: true,
       message: "Category updated successfully",
       category: resolveCategoryRate(
-        updatedCategory.toObject(),
+        updatedCategory,
         parsedRateYear
       ),
     });

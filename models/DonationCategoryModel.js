@@ -85,6 +85,29 @@ const donationCategorySchema = new mongoose.Schema(
       enum: ["fixed", "minimum"],
       default: "fixed",
     },
+    minimumAmountPerUnit: {
+      type: Boolean,
+      default: false,
+    },
+    prasadType: {
+      type: String,
+      enum: ["grams", "packet", "none"],
+      default: undefined,
+    },
+    packetsPerUnit: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    allowGramAlternativeForInPerson: {
+      type: Boolean,
+      default: false,
+    },
+    configurationVersion: {
+      type: String,
+      enum: ["legacy-v1", "category-v2"],
+      default: "legacy-v1",
+    },
     availableFor: {
       type: [String],
       enum: ["self", "child"],

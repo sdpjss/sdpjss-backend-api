@@ -72,6 +72,10 @@ import {
   processEditAndReplace,
   processFullRefund,
 } from "../controllers/additionalController.js";
+import {
+  getPrasadRate,
+  upsertPrasadRate,
+} from "../controllers/prasadRateController.js";
 
 const adminRouter = express.Router();
 
@@ -145,6 +149,8 @@ adminRouter.post("/categories", addCategory);
 adminRouter.get("/categories/:id", getCategory);
 adminRouter.put("/categories/:id", editCategory);
 adminRouter.delete("/categories/:id", deleteCategory);
+adminRouter.get("/prasad-rate", authAdmin, getPrasadRate);
+adminRouter.put("/prasad-rate", authAdmin, upsertPrasadRate);
 adminRouter.get("/user-donations", authAdmin, getUserDonations);
 
 // COURIER CHARGE
