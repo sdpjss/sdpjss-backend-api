@@ -35,6 +35,29 @@ const migrateDonationCategoryRates = async () => {
       `Assigned ${result.modifiedCount} legacy donation category rate(s) to ${LEGACY_DONATION_RATE_YEAR}`
     );
   }
+
+  const professionalResult = await donationCategoryModel.updateMany(
+    { categoryName: { $regex: "professional", $options: "i" } },
+    [
+      {
+        $set: {
+          amountType: "minimum",
+          dynamic: {
+            $mergeObjects: [
+              { $ifNull: ["$dynamic", {}] },
+              { isDynamic: true, minvalue: "$rate" },
+            ],
+          },
+        },
+      },
+    ]
+  );
+
+  if (professionalResult.modifiedCount > 0) {
+    console.log(
+      `Updated ${professionalResult.modifiedCount} Professional donation category amount rule(s) to minimum`
+    );
+  }
 };
 
 export default migrateDonationCategoryRates;

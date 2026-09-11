@@ -17,8 +17,13 @@ import guestDonationModel from "../models/GuestDonationModel.js";
 import featureModel from "../models/FeatureModel.js";
 import sendEmail from "../services/emailServer.js";
 import updateOnlineDonationsWithPrasad, {
+  applyCategoryV2Entitlement,
   applyMahaprasadFulfillment,
+  calculateCategoryV2Entitlement,
+  categoryAllowsGramCollection,
+  categoryUsesMinimumAmount,
 } from "./helpers/prasadCalculator.js";
+import prasadRateModel from "../models/PrasadRateModel.js";
 
 // Initialize Razorpay
 const razorpayInstance = new razorpay({
@@ -2191,6 +2196,12 @@ const _generateBillHTML = (donationData, userData, adminName) => {
           color: #d32f2f;
           margin-bottom: 1px;
         }
+
+        .trust-registration {
+          color: #15803d;
+          font-size: 12px;
+          font-weight: 600;
+        }
         
         .org-address {
           margin-bottom: 1px;
@@ -2572,6 +2583,7 @@ const _generateBillHTML = (donationData, userData, adminName) => {
             <span><b>Reg. No. 2020/272</b></span>
           </div>
           <div class="org-name">SHREE DURGAJI PATWAY JATI SUDHAR SAMITI</div>
+          <div class="trust-registration">(Registered under Indian Trust Act - 1882)</div>
           <div class="org-address">Shree Durga Sthan, Patwatoli, Manpur, P.O. Buniyadganj, Gaya Ji - 823003</div>
           <div class="org-contact">
             <strong>PAN:</strong> ABBTS1301C | <strong>Contact:</strong> 0631 2952160, +91 9472030916 | <strong>Email:</strong> sdpjssmanpur@gmail.com
@@ -2897,8 +2909,7 @@ const getFinancialYear = () => {
 
 const generateReceiptId = async (
   method,
-  modelName = "donation",
-  receiptIdentifier = ""
+  modelName = "donation"
 ) => {
   // 1. Determine method code
   let methodCode;
@@ -2917,7 +2928,7 @@ const generateReceiptId = async (
 
   // 3. Select the correct model and create the prefix
   let Model;
-  const receiptCode = `${methodCode}${receiptIdentifier}`;
+  const receiptCode = methodCode;
   const prefix = `SDP/${receiptCode}`;
 
   if (modelName === "donation") {
@@ -2950,15 +2961,7 @@ const generateReceiptId = async (
       }
     }
 
-    if (receiptIdentifier && nextNumber > 9999) {
-      throw new Error(
-        `Receipt sequence exhausted for ${receiptCode}/${financialYear}.`
-      );
-    }
-
-    // Pratima receipts have four sequence digits. Existing formats are kept.
-    const sequenceDigits = receiptIdentifier ? 4 : 5;
-    const paddedNumber = nextNumber.toString().padStart(sequenceDigits, "0");
+    const paddedNumber = nextNumber.toString().padStart(5, "0");
     const newReceiptId = `${prefix}${paddedNumber}/${financialYear}`;
 
     return newReceiptId;
@@ -2967,10 +2970,6 @@ const generateReceiptId = async (
     throw new Error("Failed to generate unique receipt ID.", { cause: error });
   }
 };
-
-const isPratimaDonationRecord = (donation) =>
-  donation?.donationType === "maa_durga_pratima" ||
-  donation?.list?.some((item) => item.category === "Maa Durga Pratima");
 
 // API to create a donation order (initiate payment)
 // controllers/donationController.js
@@ -3035,7 +3034,9 @@ const createDonationOrder = async (req, res) => {
       .filter(Boolean);
     const selectedCategories = await donationCategoryModel
       .find({ categoryName: { $in: selectedCategoryNames } })
-      .select("categoryName categoryCode packet dynamic availableFor")
+      .select(
+        "categoryName categoryCode rate packet dynamic amountType minimumAmountPerUnit prasadType packetsPerUnit allowGramAlternativeForInPerson configurationVersion availableFor"
+      )
       .lean();
     if (
       new Set(selectedCategoryNames).size !== selectedCategories.length
@@ -3059,6 +3060,9 @@ const createDonationOrder = async (req, res) => {
     const categoryByName = new Map(
       selectedCategories.map((category) => [category.categoryName, category])
     );
+    const usesCategoryV2 = selectedCategories.every(
+      (category) => category.configurationVersion === "category-v2"
+    );
     const combinedDonationAmount = list.reduce(
       (sum, item) => sum + (Number(item.amount) || 0),
       0
@@ -3066,6 +3070,47 @@ const createDonationOrder = async (req, res) => {
     const isMaaDurgaPratimaDonation =
       selectedCategories.length === 1 &&
       selectedCategories[0].categoryCode === "maa_durga_pratima";
+    if (usesCategoryV2) {
+      const invalidAmountItem = list.find((item) => {
+        const category = categoryByName.get(item.category?.trim());
+        const itemAmount = Number(item.amount);
+        const units = Number(item.number);
+        if (!Number.isFinite(itemAmount) || itemAmount <= 0) return true;
+        if (categoryUsesMinimumAmount(category)) {
+          const quantityMultiplier = category.minimumAmountPerUnit
+            ? units
+            : 1;
+          return (
+            (category.minimumAmountPerUnit &&
+              (!Number.isInteger(units) || units < 1)) ||
+            itemAmount < Number(category.rate) * quantityMultiplier
+          );
+        }
+        return (
+          !Number.isInteger(units) ||
+          units < 1 ||
+          Math.abs(itemAmount - Number(category.rate) * units) > 0.01
+        );
+      });
+      if (invalidAmountItem) {
+        const invalidCategory = categoryByName.get(
+          invalidAmountItem.category?.trim()
+        );
+        const message =
+          categoryUsesMinimumAmount(invalidCategory)
+            ? `${invalidCategory.categoryName} requires a minimum donation of ₹${(
+                Number(invalidCategory.rate) *
+                (invalidCategory.minimumAmountPerUnit
+                  ? Number(invalidAmountItem.number) || 1
+                  : 1)
+              ).toLocaleString("en-IN")}.`
+            : `${invalidAmountItem.category} does not satisfy its configured donation amount rule.`;
+        return res.status(400).json({
+          success: false,
+          message,
+        });
+      }
+    }
     const invalidPratimaQuantityItem = list.find((item) => {
       const category = categoryByName.get(item.category?.trim());
       const quantity = Number(item.number);
@@ -3087,6 +3132,7 @@ const createDonationOrder = async (req, res) => {
           ? Number(item.number)
           : 1;
       return (
+        !usesCategoryV2 &&
         category?.dynamic?.isDynamic &&
         (!Number.isFinite(Number(item.amount)) ||
           Number(item.amount) <
@@ -3109,7 +3155,11 @@ const createDonationOrder = async (req, res) => {
       const pratimaItem = list[0];
       const paymentAmount = Number(amount);
       const minimumPaymentAmount =
-        Number(selectedCategories[0].dynamic?.minvalue || 0) *
+        Number(
+          usesCategoryV2
+            ? selectedCategories[0].rate
+            : selectedCategories[0].dynamic?.minvalue || 0
+        ) *
         Number(pratimaItem.number);
       if (
         !Number.isFinite(paymentAmount) ||
@@ -3132,13 +3182,73 @@ const createDonationOrder = async (req, res) => {
         category.packet ||
         category.categoryName.toLowerCase().includes("professional")
     );
+    const mahaprasadEligibleAmount = list.reduce((sum, item) => {
+      const category = categoryByName.get(item.category?.trim());
+      if (usesCategoryV2) {
+        return category?.prasadType === "none"
+          ? sum
+          : sum + (Number(item.amount) || 0);
+      }
+      return category?.categoryCode === "maa_durga_pratima"
+        ? sum
+        : sum + (Number(item.amount) || 0);
+    }, 0);
+    const hasV2GramCategory =
+      usesCategoryV2 &&
+      donatedAs !== "child" &&
+      selectedCategories.some(categoryAllowsGramCollection);
+    const hasV2PacketCategory =
+      usesCategoryV2 &&
+      donatedAs !== "child" &&
+      selectedCategories.some((category) => category.prasadType === "packet");
+    const prasadRate =
+      donatedAs !== "child" && mahaprasadEligibleAmount > 0
+      ? await prasadRateModel
+          .findOne({ year: { $lte: new Date().getFullYear() } })
+          .sort({ year: -1 })
+          .lean()
+      : null;
+    if (hasV2GramCategory && !prasadRate) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "The Prasad calculation rate has not been configured for this year.",
+      });
+    }
+    const minimumCourierDonationAmount =
+      prasadRate?.minimumCourierDonationAmount ?? 1210;
+    let prasadEntitlement = usesCategoryV2
+      ? donatedAs === "child"
+        ? {
+            eligibleAmount: 0,
+            grams: 0,
+            packets: 0,
+            rateYear: prasadRate?.year,
+            rupeesPer100Grams:
+              prasadRate?.rupeesPer100Grams ||
+              (prasadRate?.gramsPerRupee
+                ? 100 / prasadRate.gramsPerRupee
+                : 0),
+            gramsPerRupee:
+              prasadRate?.gramsPerRupee ||
+              (prasadRate?.rupeesPer100Grams
+                ? 100 / prasadRate.rupeesPer100Grams
+                : 0),
+            minimumPrasadGrams: prasadRate?.minimumPrasadGrams || 0,
+            minimumCourierDonationAmount,
+            roundingUnitGrams: prasadRate?.roundingUnitGrams || 1,
+          }
+        : calculateCategoryV2Entitlement(list, selectedCategories, prasadRate)
+      : undefined;
     let normalizedFulfillment;
-    if (donatedAs === "child" || isMaaDurgaPratimaDonation) {
+    if (
+      donatedAs === "child" ||
+      isMaaDurgaPratimaDonation ||
+      (usesCategoryV2 && !hasV2GramCategory && !hasV2PacketCategory)
+    ) {
       normalizedFulfillment = { mode: "none", type: "none" };
     } else {
-      const requestedMode =
-        mahaprasadFulfillment?.mode ||
-        (deliveryAddress ? "courier" : "collection");
+      const requestedMode = mahaprasadFulfillment?.mode;
 
       if (!["collection", "courier"].includes(requestedMode)) {
         return res.status(400).json({
@@ -3148,11 +3258,10 @@ const createDonationOrder = async (req, res) => {
       }
 
       if (requestedMode === "courier") {
-        if (combinedDonationAmount < 1210) {
+        if (mahaprasadEligibleAmount < minimumCourierDonationAmount) {
           return res.status(400).json({
             success: false,
-            message:
-              "Courier delivery requires a combined donation of at least ₹1,210.",
+            message: `Courier delivery requires a Prasad-eligible donation of at least ₹${minimumCourierDonationAmount.toLocaleString("en-IN")}. No-Prasad contributions are excluded. Please choose in-person collection.`,
           });
         }
         if (!deliveryAddress?.currlocation) {
@@ -3172,11 +3281,53 @@ const createDonationOrder = async (req, res) => {
               "Courier service is not available in Manpur or in Gaya outside Manpur. Please collect Mahaprasad from Durga Sthan.",
           });
         }
-        normalizedFulfillment = { mode: "courier", type: "packet" };
+        normalizedFulfillment = {
+          mode: "courier",
+          type: "packet",
+        };
+        if (usesCategoryV2) {
+          prasadEntitlement = {
+            ...prasadEntitlement,
+            eligibleAmount: mahaprasadEligibleAmount,
+            grams: 0,
+            packets: 1,
+            minimumCourierDonationAmount,
+          };
+        }
       } else {
-        const requestedType =
-          mahaprasadFulfillment?.type === "packet" ? "packet" : "halwa";
-        if (requestedType === "packet" && !hasPacketEligibleCategory) {
+        let requestedType;
+        if (usesCategoryV2) {
+          const availableTypes = [
+            hasV2GramCategory ? "halwa" : null,
+            hasV2PacketCategory ? "packet" : null,
+          ].filter(Boolean);
+          requestedType = mahaprasadFulfillment?.type;
+          if (!availableTypes.includes(requestedType)) {
+            return res.status(400).json({
+              success: false,
+              message:
+                "Select one of the Prasad types supported by the chosen donation categories.",
+            });
+          }
+          prasadEntitlement = {
+            ...prasadEntitlement,
+            eligibleAmount:
+              requestedType === "halwa"
+                ? prasadEntitlement.eligibleAmount
+                : 0,
+            grams: requestedType === "halwa" ? prasadEntitlement.grams : 0,
+            packets:
+              requestedType === "packet" ? prasadEntitlement.packets : 0,
+          };
+        } else {
+          requestedType =
+            mahaprasadFulfillment?.type === "packet" ? "packet" : "halwa";
+        }
+        if (
+          !usesCategoryV2 &&
+          requestedType === "packet" &&
+          !hasPacketEligibleCategory
+        ) {
           return res.status(400).json({
             success: false,
             message:
@@ -3191,11 +3342,41 @@ const createDonationOrder = async (req, res) => {
     }
 
     const normalizedList = list.map((item) => ({ ...item }));
-    applyMahaprasadFulfillment({
-      donatedAs,
-      list: normalizedList,
-      mahaprasadFulfillment: normalizedFulfillment,
-    });
+    if (usesCategoryV2) {
+      applyCategoryV2Entitlement(
+        normalizedList,
+        selectedCategories,
+        prasadEntitlement,
+        { forceCourierPacket: normalizedFulfillment.mode === "courier" }
+      );
+    } else {
+      applyMahaprasadFulfillment({
+        donatedAs,
+        list: normalizedList,
+        mahaprasadFulfillment: normalizedFulfillment,
+      });
+    }
+    const categorySnapshots = usesCategoryV2
+      ? normalizedList.map((item) => {
+          const category = categoryByName.get(item.category?.trim());
+          return {
+            categoryId: category._id,
+            categoryName: category.categoryName,
+            amountType: categoryUsesMinimumAmount(category)
+              ? "minimum"
+              : "fixed",
+            minimumAmountPerUnit: Boolean(category.minimumAmountPerUnit),
+            configuredAmount: category.rate,
+            contributedAmount: Number(item.amount),
+            units: Number(item.number) || 1,
+            prasadType: category.prasadType,
+            packetsPerUnit: category.packetsPerUnit || 0,
+            allowGramAlternativeForInPerson:
+              categoryAllowsGramCollection(category) &&
+              category.prasadType === "packet",
+          };
+        })
+      : undefined;
     const normalizedCourierCharge =
       normalizedFulfillment.mode === "courier" ? courierCharge : 0;
     const normalizedDeliveryAddress =
@@ -3207,11 +3388,7 @@ const createDonationOrder = async (req, res) => {
       const donationType = isMaaDurgaPratimaDonation
         ? "maa_durga_pratima"
         : "regular";
-      const receiptId = await generateReceiptId(
-        method,
-        "donation",
-        isMaaDurgaPratimaDonation ? "P" : ""
-      );
+      const receiptId = await generateReceiptId(method, "donation");
       const donation = await donationModel.create({
         userId,
         list: normalizedList,
@@ -3224,6 +3401,9 @@ const createDonationOrder = async (req, res) => {
         postalAddress,
         deliveryAddress: normalizedDeliveryAddress,
         mahaprasadFulfillment: normalizedFulfillment,
+        calculationVersion: usesCategoryV2 ? "category-v2" : "legacy-v1",
+        prasadEntitlement,
+        categorySnapshots,
         receiptId,
         donatedAs,
         donationType,
@@ -3263,6 +3443,9 @@ const createDonationOrder = async (req, res) => {
       postalAddress,
       deliveryAddress: normalizedDeliveryAddress,
       mahaprasadFulfillment: normalizedFulfillment,
+      calculationVersion: usesCategoryV2 ? "category-v2" : "legacy-v1",
+      prasadEntitlement,
+      categorySnapshots,
       donatedAs,
       donationType: isMaaDurgaPratimaDonation
         ? "maa_durga_pratima"
@@ -3334,11 +3517,7 @@ const verifyDonationPayment = async (req, res) => {
         .json({ success: false, message: "Donation record not found" });
     }
 
-    const receiptId = await generateReceiptId(
-      "Online",
-      "donation",
-      isPratimaDonationRecord(donationToUpdate) ? "P" : ""
-    );
+    const receiptId = await generateReceiptId("Online", "donation");
 
     // Update the donation record
     const updatedDonation = await donationModel
@@ -3787,11 +3966,7 @@ export const reconcileSingleDonation = async (req, res) => {
 
     if (capturedPayment) {
       // 5. Payment was successful! Update your database.
-      const receiptId = await generateReceiptId(
-        "Online",
-        "donation",
-        isPratimaDonationRecord(donation) ? "P" : ""
-      );
+      const receiptId = await generateReceiptId("Online", "donation");
 
       await donationModel.findByIdAndUpdate(donation._id, {
         paymentStatus: "completed",

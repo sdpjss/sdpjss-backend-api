@@ -6,6 +6,14 @@ import guestUserModel from "../models/GuestUserModel.js";
 import donationModel from "../models/DonationModel.js";
 import guestDonationModel from "../models/GuestDonationModel.js";
 import childUserModel from "../models/ChildUserModel.js";
+import donationCategoryModel from "../models/DonationCategoryModel.js";
+import prasadRateModel from "../models/PrasadRateModel.js";
+import {
+  applyCategoryV2Entitlement,
+  calculateCategoryV2Entitlement,
+  categoryAllowsGramCollection,
+  categoryUsesMinimumAmount,
+} from "./helpers/prasadCalculator.js";
 
 // HELPER FUNCTIONS (Unchanged)
 //================================================================
@@ -142,7 +150,7 @@ const generateGuestReceiptId = async (method) => {
  */
 const recordGuestDonation = async (req, res) => {
   try {
-    const { donorInfo, list, method, remarks } = req.body;
+    const { donorInfo, list, method, remarks, mahaprasadFulfillment } = req.body;
 
     // --- Validation ---
     if (!donorInfo || !list || !method) {
@@ -163,12 +171,131 @@ const recordGuestDonation = async (req, res) => {
         .json({ success: false, message: "Invalid mobile number format." });
     }
 
-    const totalAmount = list.reduce((sum, item) => sum + item.amount, 0);
+    const totalAmount = list.reduce(
+      (sum, item) => sum + (Number(item.amount) || 0),
+      0
+    );
     if (totalAmount <= 0) {
       return res
         .status(400)
         .json({ success: false, message: "Donation amount must be positive." });
     }
+
+    const categoryNames = list.map((item) => item.category?.trim());
+    const categories = await donationCategoryModel
+      .find({ categoryName: { $in: categoryNames } })
+      .lean();
+    if (new Set(categoryNames).size !== categories.length) {
+      return res.status(400).json({
+        success: false,
+        message: "One or more donation categories are invalid.",
+      });
+    }
+    const categoryByName = new Map(
+      categories.map((category) => [category.categoryName, category])
+    );
+    const usesCategoryV2 = categories.every(
+      (category) => category.configurationVersion === "category-v2"
+    );
+    const invalidV2Item = usesCategoryV2
+      ? list.find((item) => {
+          const category = categoryByName.get(item.category?.trim());
+          const units = Number(item.number);
+          const itemAmount = Number(item.amount);
+          return categoryUsesMinimumAmount(category)
+            ? (category.minimumAmountPerUnit &&
+                (!Number.isInteger(units) || units < 1)) ||
+                itemAmount <
+                  Number(category.rate) *
+                    (category.minimumAmountPerUnit ? units : 1)
+            : !Number.isInteger(units) ||
+                units < 1 ||
+                Math.abs(itemAmount - Number(category.rate) * units) > 0.01;
+        })
+      : null;
+    if (invalidV2Item) {
+      return res.status(400).json({
+        success: false,
+        message: `${invalidV2Item.category} does not satisfy its configured donation amount rule.`,
+      });
+    }
+    const hasGramCategory =
+      usesCategoryV2 &&
+      categories.some(categoryAllowsGramCollection);
+    const prasadRate = hasGramCategory
+      ? await prasadRateModel
+          .findOne({ year: { $lte: new Date().getFullYear() } })
+          .sort({ year: -1 })
+          .lean()
+      : null;
+    if (hasGramCategory && !prasadRate) {
+      return res.status(400).json({
+        success: false,
+        message: "The Prasad calculation rate has not been configured.",
+      });
+    }
+    const normalizedList = list.map((item) => ({ ...item }));
+    let prasadEntitlement = usesCategoryV2
+      ? calculateCategoryV2Entitlement(normalizedList, categories, prasadRate)
+      : undefined;
+    let selectedPrasadType;
+    if (usesCategoryV2) {
+      const availableTypes = [
+        categories.some(categoryAllowsGramCollection)
+          ? "halwa"
+          : null,
+        categories.some((category) => category.prasadType === "packet")
+          ? "packet"
+          : null,
+      ].filter(Boolean);
+      selectedPrasadType =
+        availableTypes.length === 1
+          ? availableTypes[0]
+          : mahaprasadFulfillment?.type;
+      if (
+        availableTypes.length > 0 &&
+        !availableTypes.includes(selectedPrasadType)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Select one of the Prasad types supported by the chosen donation categories.",
+        });
+      }
+      prasadEntitlement = {
+        ...prasadEntitlement,
+        eligibleAmount:
+          selectedPrasadType === "halwa"
+            ? prasadEntitlement.eligibleAmount
+            : 0,
+        grams:
+          selectedPrasadType === "halwa" ? prasadEntitlement.grams : 0,
+        packets:
+          selectedPrasadType === "packet" ? prasadEntitlement.packets : 0,
+      };
+      applyCategoryV2Entitlement(normalizedList, categories, prasadEntitlement);
+    }
+    const categorySnapshots = usesCategoryV2
+      ? normalizedList.map((item) => {
+          const category = categoryByName.get(item.category?.trim());
+          return {
+            categoryId: category._id,
+            categoryName: category.categoryName,
+            amountType: categoryUsesMinimumAmount(category)
+              ? "minimum"
+              : "fixed",
+            minimumAmountPerUnit: Boolean(category.minimumAmountPerUnit),
+            configuredAmount: category.rate,
+            contributedAmount: Number(item.amount),
+            units: Number(item.number) || 1,
+            prasadType: category.prasadType,
+            packetsPerUnit: category.packetsPerUnit || 0,
+            allowGramAlternativeForInPerson:
+              categoryAllowsGramCollection(category) &&
+              category.prasadType === "packet",
+          };
+        })
+      : undefined;
 
     // --- Handle 'Cash' and 'QR Code' donations ---
     if (method === "Cash" || method === "QR Code") {
@@ -205,11 +332,20 @@ const recordGuestDonation = async (req, res) => {
       const receiptId = await generateGuestReceiptId(method);
       const newDonation = new guestDonationModel({
         guestId: guest._id,
-        list,
+        list: normalizedList,
         amount: totalAmount,
         method,
         remarks,
         receiptId,
+        calculationVersion: usesCategoryV2 ? "category-v2" : "legacy-v1",
+        prasadEntitlement,
+        categorySnapshots,
+        mahaprasadFulfillment: usesCategoryV2
+          ? {
+              mode: selectedPrasadType ? "collection" : "none",
+              type: selectedPrasadType || "none",
+            }
+          : undefined,
         // Using a generic transactionId for manual entries
         transactionId: `${method
           .replace(" ", "_")
@@ -709,11 +845,7 @@ export const processEditAndReplace = async (req, res) => {
       });
     }
 
-    // --- Step 2: Mark original as refunded ---
-    originalDonation.refunded = true;
-    await originalDonation.save();
-
-    // --- Step 3: Determine final payment method and generate new Receipt ID ---
+    // --- Step 2: Determine final payment method and generate new Receipt ID ---
     const amountDifference = updatedDonation.amount - originalDonation.amount;
     let finalPaymentMethod = originalDonation.method; // Default to original method // ✅ **IMPROVEMENT**: If new amount is GREATER, use the new adjustment method.
 
@@ -725,13 +857,7 @@ export const processEditAndReplace = async (req, res) => {
     const Model = isGuestDonation ? guestDonationModel : donationModel;
     const newReceiptId = await generateReceiptId(
       finalPaymentMethod,
-      Model.modelName.toLowerCase(),
-      originalDonation.donationType === "maa_durga_pratima" ||
-        originalDonation.list?.some(
-          (item) => item.category === "Maa Durga Pratima"
-        )
-        ? "P"
-        : ""
+      Model.modelName.toLowerCase()
     );
 
     const originalData = originalDonation.toObject();
@@ -749,11 +875,138 @@ export const processEditAndReplace = async (req, res) => {
       method: finalPaymentMethod,
     };
 
+    if (updatedDonation.list) {
+      const categoryNames = updatedDonation.list.map((item) =>
+        item.category?.trim()
+      );
+      const categories = await donationCategoryModel
+        .find({ categoryName: { $in: categoryNames } })
+        .lean();
+      const usesCategoryV2 =
+        new Set(categoryNames).size === categories.length &&
+        categories.every(
+          (category) => category.configurationVersion === "category-v2"
+        );
+
+      if (usesCategoryV2) {
+        const categoryByName = new Map(
+          categories.map((category) => [category.categoryName, category])
+        );
+        const invalidItem = updatedDonation.list.find((item) => {
+          const category = categoryByName.get(item.category?.trim());
+          const units = Number(item.number);
+          const itemAmount = Number(item.amount);
+          return categoryUsesMinimumAmount(category)
+            ? (category.minimumAmountPerUnit &&
+                (!Number.isInteger(units) || units < 1)) ||
+                itemAmount <
+                  Number(category.rate) *
+                    (category.minimumAmountPerUnit ? units : 1)
+            : !Number.isInteger(units) ||
+                units < 1 ||
+                Math.abs(itemAmount - Number(category.rate) * units) > 0.01;
+        });
+        if (invalidItem) {
+          return res.status(400).json({
+            success: false,
+            message: `${invalidItem.category} does not satisfy its configured donation amount rule.`,
+          });
+        }
+        const isCourier =
+          newDonationData.mahaprasadFulfillment?.mode === "courier";
+        const rateNeeded =
+          isCourier ||
+          categories.some(categoryAllowsGramCollection);
+        const rate = rateNeeded
+          ? await prasadRateModel
+              .findOne({ year: { $lte: new Date().getFullYear() } })
+              .sort({ year: -1 })
+              .lean()
+          : null;
+        if (rateNeeded && !rate) {
+          return res.status(400).json({
+            success: false,
+            message: "The Prasad calculation rate has not been configured.",
+          });
+        }
+        let entitlement = calculateCategoryV2Entitlement(
+          updatedDonation.list,
+          categories,
+          rate
+        );
+        if (isCourier) {
+          const courierEligibleAmount = updatedDonation.list.reduce(
+            (sum, item) =>
+              categoryByName.get(item.category?.trim())?.prasadType === "none"
+                ? sum
+                : sum + (Number(item.amount) || 0),
+            0
+          );
+          const minimumCourierDonationAmount =
+            rate?.minimumCourierDonationAmount ?? 1210;
+          if (courierEligibleAmount < minimumCourierDonationAmount) {
+            return res.status(400).json({
+              success: false,
+              message: `Courier requires at least ₹${minimumCourierDonationAmount.toLocaleString("en-IN")} from Prasad-eligible categories. Please use in-person collection.`,
+            });
+          }
+          entitlement = {
+            ...entitlement,
+            eligibleAmount: courierEligibleAmount,
+            grams: 0,
+            packets: 1,
+            minimumCourierDonationAmount,
+          };
+        } else if (
+          newDonationData.mahaprasadFulfillment?.type === "packet"
+        ) {
+          entitlement = { ...entitlement, eligibleAmount: 0, grams: 0 };
+        } else {
+          entitlement = { ...entitlement, packets: 0 };
+        }
+        const normalizedList = updatedDonation.list.map((item) => ({
+          ...item,
+        }));
+        applyCategoryV2Entitlement(normalizedList, categories, entitlement, {
+          forceCourierPacket: isCourier,
+        });
+        newDonationData.list = normalizedList;
+        newDonationData.calculationVersion = "category-v2";
+        newDonationData.prasadEntitlement = entitlement;
+        newDonationData.categorySnapshots = normalizedList.map((item) => {
+          const category = categoryByName.get(item.category?.trim());
+          return {
+            categoryId: category._id,
+            categoryName: category.categoryName,
+            amountType: categoryUsesMinimumAmount(category)
+              ? "minimum"
+              : "fixed",
+            minimumAmountPerUnit: Boolean(category.minimumAmountPerUnit),
+            configuredAmount: category.rate,
+            contributedAmount: Number(item.amount),
+            units: Number(item.number) || 1,
+            prasadType: category.prasadType,
+            packetsPerUnit: category.packetsPerUnit || 0,
+            allowGramAlternativeForInPerson:
+              categoryAllowsGramCollection(category) &&
+              category.prasadType === "packet",
+          };
+        });
+      } else {
+        newDonationData.calculationVersion = "legacy-v1";
+        delete newDonationData.prasadEntitlement;
+        delete newDonationData.categorySnapshots;
+      }
+    }
+
     if (amountDifference > 0 && adjustmentDetails) {
       // If the new amount is GREATER, a new payment was made for the difference.
       // The new donation record should reflect this new payment's details.
       newDonationData.transactionId = adjustmentDetails.transactionId;
     }
+
+    originalDonation.refunded = true;
+    await originalDonation.save();
 
     const newDonation = new Model(newDonationData);
     await newDonation.save();

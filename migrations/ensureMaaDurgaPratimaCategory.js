@@ -29,6 +29,9 @@ const ensureMaaDurgaPratimaCategory = async () => {
         minvalue: MINIMUM_AMOUNT,
       },
       amountType: "minimum",
+      prasadType: "none",
+      packetsPerUnit: 0,
+      configurationVersion: "category-v2",
       availableFor: ["self"],
       isSpecial: true,
       showInRegularDonation: false,
@@ -45,27 +48,24 @@ const ensureMaaDurgaPratimaCategory = async () => {
   existingCategory.dynamic = {
     ...existingCategory.dynamic,
     isDynamic: true,
-    minvalue: Math.max(
-      Number(existingCategory.dynamic?.minvalue) || 0,
-      MINIMUM_AMOUNT
-    ),
+    minvalue:
+      Number(existingCategory.dynamic?.minvalue) ||
+      Number(existingCategory.rate) ||
+      MINIMUM_AMOUNT,
   };
 
   const isDisabledForCurrentYear =
     existingCategory.disabledRateYears?.includes(currentYear);
   if (
     !isDisabledForCurrentYear &&
-    !existingCategory.yearlyRates.some(({ year }) => year === currentYear)
+    existingCategory.yearlyRates.length === 0
   ) {
     existingCategory.yearlyRates.push({
       year: currentYear,
       rate: MINIMUM_AMOUNT,
     });
   }
-  existingCategory.rate = Math.max(
-    Number(existingCategory.rate) || 0,
-    MINIMUM_AMOUNT
-  );
+  existingCategory.rate = Number(existingCategory.rate) || MINIMUM_AMOUNT;
   await existingCategory.save();
 };
 

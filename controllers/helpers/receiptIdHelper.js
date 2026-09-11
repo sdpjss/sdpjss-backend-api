@@ -33,18 +33,15 @@ const getFinancialYear = () => {
 
 /**
  * Generates a unique receipt ID based on payment method and model.
- * The format is SDP/[PaymentMethod][Identifier][SequenceNumber]/[FinancialYear]
- * e.g., SDP/C0001/25-26 or SDP/OP0001/25-26 for a Pratima donation
+ * The format is SDP/[PaymentMethod][SequenceNumber]/[FinancialYear].
  *
  * @param {string} method The payment method ("Cash", "Online", "QR Code").
  * @param {string} [modelName="donation"] The model name ("donation" or "guestdonation").
- * @param {string} [receiptIdentifier=""] Optional donation identifier such as "P" for Pratima.
  * @returns {Promise<string>} The new unique receipt ID.
  */
 export const generateReceiptId = async (
   method,
-  modelName = "donation",
-  receiptIdentifier = ""
+  modelName = "donation"
 ) => {
   console.log("In generate Receipt: ", method);
 
@@ -65,7 +62,7 @@ export const generateReceiptId = async (
 
   // 3. Select the correct model and create the prefix
   let Model;
-  const receiptCode = `${methodCode}${receiptIdentifier}`;
+  const receiptCode = methodCode;
   const prefix = `SDP/${receiptCode}`;
 
   if (modelName === "donation") {
@@ -98,13 +95,6 @@ export const generateReceiptId = async (
       }
     }
 
-    if (receiptIdentifier && nextNumber > 9999) {
-      throw new Error(
-        `Receipt sequence exhausted for ${receiptCode}/${financialYear}.`
-      );
-    }
-
-    // Pratima and existing helper-generated receipts use four digits.
     const paddedNumber = nextNumber.toString().padStart(4, "0");
     const newReceiptId = `${prefix}${paddedNumber}/${financialYear}`;
 

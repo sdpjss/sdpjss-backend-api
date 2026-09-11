@@ -47,6 +47,7 @@ import {
   getCategory,
   getCourierCharges,
 } from "../controllers/adminController.js";
+import { getPrasadRate } from "../controllers/prasadRateController.js";
 import {
   addChildUser,
   deleteChildUser,
@@ -151,6 +152,7 @@ userRouter.put(
 
 userRouter.get("/categories", getAllCategories);
 userRouter.get("/categories/:id", getCategory);
+userRouter.get("/prasad-rate", authUser, getPrasadRate);
 
 // -----DONATION ROUTES-----
 // Create donation order (initiate payment)

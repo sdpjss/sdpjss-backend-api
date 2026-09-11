@@ -32,6 +32,18 @@ const teamMemberSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    effectiveFrom: {
+      type: Date,
+    },
+    effectiveTo: {
+      type: Date,
+      default: null,
+    },
+    order: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
   },
   { timestamps: true }
 );
