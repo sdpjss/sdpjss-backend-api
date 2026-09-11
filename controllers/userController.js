@@ -3035,7 +3035,7 @@ const createDonationOrder = async (req, res) => {
     const selectedCategories = await donationCategoryModel
       .find({ categoryName: { $in: selectedCategoryNames } })
       .select(
-        "categoryName categoryCode rate packet dynamic amountType minimumAmountPerUnit prasadType packetsPerUnit allowGramAlternativeForInPerson configurationVersion availableFor"
+        "categoryName categoryCode rate packet dynamic amountType minimumAmountPerUnit prasadType packetsPerUnit allowGramAlternativeForInPerson applicableToChildDonation configurationVersion availableFor"
       )
       .lean();
     if (
@@ -3047,9 +3047,15 @@ const createDonationOrder = async (req, res) => {
       });
     }
     const unavailableCategory = selectedCategories.find(
-      (category) =>
-        category.availableFor?.length > 0 &&
-        !category.availableFor.includes(donatedAs)
+      (category) => {
+        if (donatedAs === "child") {
+          return !category.applicableToChildDonation;
+        }
+        return (
+          category.availableFor?.length > 0 &&
+          !category.availableFor.includes(donatedAs)
+        );
+      }
     );
     if (unavailableCategory) {
       return res.status(400).json({
