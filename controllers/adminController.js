@@ -19,6 +19,10 @@ import featureModel from "../models/FeatureModel.js"; // Make sure to import you
 import guestDonationModel from "../models/GuestDonationModel.js";
 import guestUserModel from "../models/GuestUserModel.js";
 import updateOnlineDonationsWithPrasad from "./helpers/prasadCalculator.js";
+import {
+  formatStructuredAddress,
+  normalizeDeliveryAddress,
+} from "./helpers/addressFormatter.js";
 
 const generateTokens = (admin) => {
   // Access token has a short lifespan (e.g., 15 minutes)
@@ -431,6 +435,271 @@ const getDonationList = async (req, res) => {
   } catch (error) {
     console.log("Error in getDonationList:", error);
     res.json({ success: false, message: error.message });
+  }
+};
+
+const getCorrectionValues = (donation) => {
+  const list = (donation.list || []).map((item) => ({
+    category: item.category,
+    isPacket: Boolean(item.isPacket),
+    quantity: Number(item.quantity) || 0,
+  }));
+  const listGrams = list.reduce(
+    (sum, item) => sum + (item.isPacket ? 0 : item.quantity),
+    0
+  );
+  const listPackets = list.reduce(
+    (sum, item) => sum + (item.isPacket ? item.quantity : 0),
+    0
+  );
+  const hasStoredEntitlement =
+    donation.prasadEntitlement &&
+    (donation.prasadEntitlement.grams !== undefined ||
+      donation.prasadEntitlement.packets !== undefined);
+  const prasadGrams = hasStoredEntitlement
+    ? Number(donation.prasadEntitlement.grams) || 0
+    : listGrams;
+  const prasadPackets = hasStoredEntitlement
+    ? Number(donation.prasadEntitlement.packets) || 0
+    : listPackets;
+  const storedType = donation.mahaprasadFulfillment?.type;
+  const prasadType = ["none", "halwa", "packet"].includes(storedType)
+    ? storedType
+    : prasadPackets > 0
+      ? "packet"
+      : prasadGrams > 0
+        ? "halwa"
+        : "none";
+  const address = (donation.postalAddress || "").toLowerCase();
+  const inferredCollection =
+    address === "will collect from durga sthan" ||
+    (address.includes("gaya") && address.includes("bihar"));
+  const fulfillmentMode =
+    donation.mahaprasadFulfillment?.mode ||
+    (prasadType === "none"
+      ? "none"
+      : inferredCollection
+        ? "collection"
+        : "courier");
+
+  return {
+    postalAddress: donation.postalAddress || "",
+    deliveryAddress: donation.deliveryAddress?.toObject
+      ? donation.deliveryAddress.toObject()
+      : donation.deliveryAddress,
+    fulfillmentMode,
+    prasadType,
+    prasadGrams,
+    prasadPackets,
+    list,
+  };
+};
+
+const correctDonationFulfillment = async (req, res) => {
+  try {
+    const { donationId } = req.params;
+    const {
+      deliveryAddress,
+      fulfillmentMode,
+      prasadType,
+      prasadQuantity,
+      reason,
+    } = req.body;
+    if (!["none", "collection", "courier"].includes(fulfillmentMode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid Mahaprasad fulfilment mode.",
+      });
+    }
+
+    const normalizedPrasadType =
+      fulfillmentMode === "none"
+        ? "none"
+        : fulfillmentMode === "courier"
+          ? "packet"
+          : prasadType;
+    if (!["none", "halwa", "packet"].includes(normalizedPrasadType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid Mahaprasad type.",
+      });
+    }
+    if (fulfillmentMode !== "none" && normalizedPrasadType === "none") {
+      return res.status(400).json({
+        success: false,
+        message: "Select a Mahaprasad type for the chosen fulfilment mode.",
+      });
+    }
+
+    const normalizedQuantity =
+      normalizedPrasadType === "none" ? 0 : Number(prasadQuantity);
+    if (
+      !Number.isInteger(normalizedQuantity) ||
+      (normalizedPrasadType === "none"
+        ? normalizedQuantity !== 0
+        : normalizedQuantity < 1)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          normalizedPrasadType === "packet"
+            ? "Packet quantity must be a positive whole number."
+            : "Mahaprasad quantity must be a positive whole number of grams.",
+      });
+    }
+    if (!reason?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "A reason for the correction is required.",
+      });
+    }
+
+    let normalizedDeliveryAddress;
+    if (deliveryAddress !== undefined) {
+      if (
+        !deliveryAddress ||
+        typeof deliveryAddress !== "object" ||
+        Array.isArray(deliveryAddress)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Delivery address must contain structured address fields.",
+        });
+      }
+      normalizedDeliveryAddress = normalizeDeliveryAddress(deliveryAddress);
+      const validDeliveryLocations = new Set([
+        "in_manpur",
+        "in_gaya_outside_manpur",
+        "in_bihar_outside_gaya",
+        "in_india_outside_bihar",
+        "outside_india",
+      ]);
+      if (!validDeliveryLocations.has(normalizedDeliveryAddress.currlocation)) {
+        return res.status(400).json({
+          success: false,
+          message: "Select a valid delivery region.",
+        });
+      }
+      const requiredAddressFields = [
+        "currlocation",
+        "country",
+        "city",
+        "pin",
+        "street",
+      ];
+      if (normalizedDeliveryAddress.currlocation !== "outside_india") {
+        requiredAddressFields.push("state");
+      }
+      const missingField = requiredAddressFields.find(
+        (field) => !normalizedDeliveryAddress[field]
+      );
+      if (missingField) {
+        return res.status(400).json({
+          success: false,
+          message: `Complete the ${missingField} field in the delivery address.`,
+        });
+      }
+      if (
+        normalizedDeliveryAddress.currlocation !== "outside_india" &&
+        !/^\d{6}$/.test(normalizedDeliveryAddress.pin)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "PIN Code must be exactly 6 digits.",
+        });
+      }
+      if (!formatStructuredAddress(normalizedDeliveryAddress)) {
+        return res.status(400).json({
+          success: false,
+          message: "Enter a valid delivery address.",
+        });
+      }
+    }
+
+    const donation = await donationModel.findById(donationId);
+    if (!donation) {
+      return res.status(404).json({
+        success: false,
+        message: "Donation not found.",
+      });
+    }
+    if (donation.paymentStatus !== "completed" || donation.refunded) {
+      return res.status(400).json({
+        success: false,
+        message: "Only completed, non-refunded donations can be corrected.",
+      });
+    }
+
+    const previousValues = getCorrectionValues(donation);
+    if (normalizedDeliveryAddress) {
+      donation.deliveryAddress = normalizedDeliveryAddress;
+      donation.postalAddress = formatStructuredAddress(
+        normalizedDeliveryAddress
+      );
+    }
+    donation.mahaprasadFulfillment = {
+      mode: fulfillmentMode,
+      type: normalizedPrasadType,
+    };
+
+    const currentEntitlement = donation.prasadEntitlement?.toObject
+      ? donation.prasadEntitlement.toObject()
+      : donation.prasadEntitlement || {};
+    donation.prasadEntitlement = {
+      ...currentEntitlement,
+      eligibleAmount:
+        normalizedPrasadType === "halwa"
+          ? Number(currentEntitlement.eligibleAmount) || 0
+          : 0,
+      grams: normalizedPrasadType === "halwa" ? normalizedQuantity : 0,
+      packets: normalizedPrasadType === "packet" ? normalizedQuantity : 0,
+    };
+
+    donation.list.forEach((item) => {
+      item.isPacket = false;
+      item.quantity = 0;
+    });
+    if (normalizedPrasadType !== "none" && donation.list.length > 0) {
+      const targetItem =
+        donation.list.find(
+          (item) => !item.category?.toLowerCase().includes("pratima")
+        ) || donation.list[0];
+      targetItem.isPacket = normalizedPrasadType === "packet";
+      targetItem.quantity = normalizedQuantity;
+    }
+
+    const updatedValues = getCorrectionValues(donation);
+    donation.adminCorrections.push({
+      correctedBy: String(req.adminId || "unknown"),
+      reason: reason.trim(),
+      previousValues,
+      updatedValues,
+    });
+
+    await donation.save();
+    await donation.populate(
+      "userId",
+      "_id fullname email contact address fatherName gender"
+    );
+    await donation.populate("donatedFor", "fullname gender");
+
+    return res.json({
+      success: true,
+      message: "Donation fulfilment details updated successfully.",
+      donation,
+    });
+  } catch (error) {
+    console.error("Error correcting donation fulfilment:", error);
+    if (error.name === "CastError") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid donation ID.",
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: "Unable to update the donation fulfilment details.",
+    });
   }
 };
 
@@ -1942,6 +2211,7 @@ export {
   getJobOpeningList,
   getAdvertisementList,
   getDonationList,
+  correctDonationFulfillment,
   getGuestDonationList,
   getFamilyCount,
   getUserCount,

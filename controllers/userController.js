@@ -24,6 +24,10 @@ import updateOnlineDonationsWithPrasad, {
   categoryUsesMinimumAmount,
 } from "./helpers/prasadCalculator.js";
 import prasadRateModel from "../models/PrasadRateModel.js";
+import {
+  formatStructuredAddress,
+  normalizeDeliveryAddress,
+} from "./helpers/addressFormatter.js";
 
 // Initialize Razorpay
 const razorpayInstance = new razorpay({
@@ -3419,7 +3423,14 @@ const createDonationOrder = async (req, res) => {
     const normalizedCourierCharge =
       normalizedFulfillment.mode === "courier" ? courierCharge : 0;
     const normalizedDeliveryAddress =
-      normalizedFulfillment.mode === "courier" ? deliveryAddress : undefined;
+      normalizedFulfillment.mode === "courier"
+        ? normalizeDeliveryAddress(deliveryAddress)
+        : undefined;
+    if (normalizedDeliveryAddress) {
+      normalizedPostalAddress = formatStructuredAddress(
+        normalizedDeliveryAddress
+      );
+    }
 
     // --- The child creation/update logic has been REMOVED from here ---
 
@@ -3608,6 +3619,7 @@ const getUserDonations = async (req, res) => {
 
     const donations = await donationModel
       .find({ userId })
+      .select("-adminCorrections")
       .sort({ createdAt: -1 }); // Most recent first
 
     const updatedDonationsWithPrasad = updateOnlineDonationsWithPrasad(donations);
@@ -3627,6 +3639,7 @@ const getAllDonations = async (req, res) => {
   try {
     const donations = await donationModel
       .find()
+      .select("-adminCorrections")
       .populate("userId", "fullname email contact")
       .sort({ createdAt: -1 });
 
@@ -3990,13 +4003,11 @@ export const reconcileSingleDonation = async (req, res) => {
     // 3. Fetch payment details for the order from Razorpay
     const payments = await razorpayInstance.orders.fetchPayments(orderId);
 
-    if (!payments || payments.items.length === 0) {
-      // No payment was ever attempted for this order, mark it as failed
-      donation.paymentStatus = "failed";
-      await donation.save();
+    if (!payments || !Array.isArray(payments.items) || payments.items.length === 0) {
       return res.json({
         success: false,
-        message: "No payment attempt found for this order. Marked as Failed.",
+        message:
+          "No payment attempt was found for this order. The donation remains Pending.",
       });
     }
 
@@ -4018,32 +4029,26 @@ export const reconcileSingleDonation = async (req, res) => {
         success: true,
         message: `Successfully reconciled. Receipt: ${receiptId}`,
       });
-    } else {
-      // 6. No successful payment found, mark as failed
-      donation.paymentStatus = "failed";
-      await donation.save();
-      return res.json({
-        success: false,
-        message: "Payment was not successful. Marked as Failed.",
-      });
     }
+
+    return res.json({
+      success: false,
+      message:
+        "No captured payment was found for this order. The donation remains Pending.",
+    });
   } catch (error) {
     console.error("Error during manual reconciliation:", error);
-    // Handle cases where order might not exist on Razorpay anymore
     if (error.statusCode === 404) {
-      await donationModel.findByIdAndUpdate(donationId, {
-        paymentStatus: "failed",
+      return res.status(404).json({
+        success: false,
+        message: "Order not found on Razorpay. The donation remains Pending.",
       });
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message: "Order not found on Razorpay. Marked as Failed.",
-        });
     }
-    return res
-      .status(500)
-      .json({ success: false, message: "An internal server error occurred." });
+    return res.status(500).json({
+      success: false,
+      message:
+        "An internal server error occurred. The donation remains Pending.",
+    });
   }
 };
 

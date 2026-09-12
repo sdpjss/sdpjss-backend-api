@@ -18,6 +18,36 @@ const deliveryAddressSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const donationCorrectionValuesSchema = new mongoose.Schema(
+  {
+    postalAddress: String,
+    deliveryAddress: { type: deliveryAddressSchema, default: undefined },
+    fulfillmentMode: String,
+    prasadType: String,
+    prasadGrams: Number,
+    prasadPackets: Number,
+    list: [
+      {
+        category: String,
+        isPacket: Boolean,
+        quantity: Number,
+      },
+    ],
+  },
+  { _id: false }
+);
+
+const donationCorrectionSchema = new mongoose.Schema(
+  {
+    correctedAt: { type: Date, default: Date.now },
+    correctedBy: { type: String, required: true },
+    reason: { type: String, required: true, trim: true },
+    previousValues: { type: donationCorrectionValuesSchema, required: true },
+    updatedValues: { type: donationCorrectionValuesSchema, required: true },
+  },
+  { _id: false }
+);
+
 const donationSchema = new mongoose.Schema(
   {
     userId: {
@@ -117,6 +147,10 @@ const donationSchema = new mongoose.Schema(
         allowGramAlternativeForInPerson: Boolean,
       },
     ],
+    adminCorrections: {
+      type: [donationCorrectionSchema],
+      default: [],
+    },
     paymentStatus: {
       // Keep only one paymentStatus
       type: String,
