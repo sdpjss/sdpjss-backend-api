@@ -31,6 +31,23 @@ const razorpayInstance = new razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
+const formatProfileAddress = (address = {}) =>
+  [
+    address.room ? `Room-${address.room}` : "",
+    address.floor ? `Floor-${address.floor}` : "",
+    address.apartment,
+    address.landmark,
+    address.street,
+    address.postoffice ? `PO: ${address.postoffice}` : "",
+    address.city,
+    address.district,
+    address.state,
+    address.country,
+    address.pin ? `PIN: ${address.pin}` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+
 // Function to generate username from fullname and dob
 const generateUsername = (fullname, dob) => {
   const firstName = fullname.split(" ")[0].toLowerCase();
@@ -3024,6 +3041,22 @@ const createDonationOrder = async (req, res) => {
       return res.json({ success: false, message: "Invalid payment method" });
     }
 
+    let normalizedPostalAddress = postalAddress;
+    if (donatedAs === "child") {
+      const donorProfile = await userModel
+        .findById(userId)
+        .select("address")
+        .lean();
+      if (!donorProfile) {
+        return res.status(404).json({
+          success: false,
+          message: "Donor profile not found.",
+        });
+      }
+      normalizedPostalAddress =
+        formatProfileAddress(donorProfile.address) || "Address not provided";
+    }
+
     const courierUnavailableLocations = new Set([
       "in_manpur",
       "in_gaya_outside_manpur",
@@ -3404,7 +3437,7 @@ const createDonationOrder = async (req, res) => {
         remarks,
         transactionId: `CASH_${Date.now()}`,
         paymentStatus: "completed",
-        postalAddress,
+        postalAddress: normalizedPostalAddress,
         deliveryAddress: normalizedDeliveryAddress,
         mahaprasadFulfillment: normalizedFulfillment,
         calculationVersion: usesCategoryV2 ? "category-v2" : "legacy-v1",
@@ -3433,7 +3466,7 @@ const createDonationOrder = async (req, res) => {
       amount: Math.round(amount * 100),
       currency: process.env.CURRENCY || "INR",
       receipt: `receipt_${Date.now()}`,
-      notes: { userId, postalAddress },
+      notes: { userId, postalAddress: normalizedPostalAddress },
     };
     const razorpayOrder = await razorpayInstance.orders.create(options);
 
@@ -3446,7 +3479,7 @@ const createDonationOrder = async (req, res) => {
       remarks,
       razorpayOrderId: razorpayOrder.id,
       paymentStatus: "pending",
-      postalAddress,
+      postalAddress: normalizedPostalAddress,
       deliveryAddress: normalizedDeliveryAddress,
       mahaprasadFulfillment: normalizedFulfillment,
       calculationVersion: usesCategoryV2 ? "category-v2" : "legacy-v1",
