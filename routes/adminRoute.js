@@ -7,6 +7,7 @@ import {
   addNotice,
   blockAdmin,
   createCourierCharge,
+  correctDonationFulfillment,
   deleteCategory,
   deleteCourierCharge,
   deleteNotice,
@@ -101,6 +102,11 @@ adminRouter.put("/update-notice/:id", authAdmin, updateNotice);
 adminRouter.delete("/delete-notice/:id", authAdmin, deleteNotice);
 
 adminRouter.get("/donation-list", authAdmin, getDonationList);
+adminRouter.put(
+  "/donations/:donationId/fulfillment",
+  authAdmin,
+  correctDonationFulfillment
+);
 adminRouter.get("/donation-stats", authAdmin, getDonationStats);
 adminRouter.get("/donation-count", authAdmin, getDonationCount); // <-- Add this new route
 adminRouter.get(
