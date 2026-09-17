@@ -5,6 +5,7 @@ import {
   getAllGuestUsers,
   getGuestDonationsById,
 } from "../controllers/additionalController.js";
+import { authAdmin } from "../middlewares/authAdmin.js";
 
 const additionalRouter = express.Router();
 
@@ -18,7 +19,11 @@ additionalRouter.get("/all-guest-users", getAllGuestUsers);
 // 📄 Record a new donation for a guest and get a downloadable PDF receipt
 // METHOD: POST
 // ENDPOINT: /api/additional/record-guest-donation
-additionalRouter.post("/record-guest-donation", recordGuestDonation);
+additionalRouter.post(
+  "/record-guest-donation",
+  authAdmin,
+  recordGuestDonation
+);
 
 // 📊 Get a combined list of all donations (from registered users and guests)
 // METHOD: GET

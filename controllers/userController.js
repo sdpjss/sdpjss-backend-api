@@ -2900,7 +2900,7 @@ const _generateBillHTML = (donationData, userData, adminName) => {
 /**
  * Generates a unique receipt ID based on the donation method and year.
  * Format: SD[Method_Code][YY][IncrementingNumber]
- * Method Codes: C for Cash, O for Online
+ * Method Codes: C for Cash, O for Online, Q for QR Code
  * Example: SDC250000001
  */
 const getFinancialYear = () => {
@@ -3041,8 +3041,14 @@ const createDonationOrder = async (req, res) => {
         message: "Amount must be greater than 0",
       });
     }
-    if (!["Cash", "Online"].includes(method)) {
+    if (!["Cash", "Online", "QR Code"].includes(method)) {
       return res.json({ success: false, message: "Invalid payment method" });
+    }
+    if (method === "QR Code" && !req.adminId) {
+      return res.json({
+        success: false,
+        message: "QR Code receipt entry is available to administrators only",
+      });
     }
 
     let normalizedPostalAddress = postalAddress;
@@ -3434,7 +3440,7 @@ const createDonationOrder = async (req, res) => {
 
     // --- The child creation/update logic has been REMOVED from here ---
 
-    if (method === "Cash") {
+    if (["Cash", "QR Code"].includes(method)) {
       const donationType = isMaaDurgaPratimaDonation
         ? "maa_durga_pratima"
         : "regular";
@@ -3446,7 +3452,7 @@ const createDonationOrder = async (req, res) => {
         method,
         courierCharge: normalizedCourierCharge,
         remarks,
-        transactionId: `CASH_${Date.now()}`,
+        transactionId: `${method === "Cash" ? "CASH" : "QR_CODE"}_${Date.now()}`,
         paymentStatus: "completed",
         postalAddress: normalizedPostalAddress,
         deliveryAddress: normalizedDeliveryAddress,
@@ -3463,7 +3469,7 @@ const createDonationOrder = async (req, res) => {
 
       return res.json({
         success: true,
-        message: "Cash donation recorded",
+        message: `${method} donation recorded`,
         donation,
         paymentRequired: false,
       });
