@@ -10,10 +10,15 @@ import donationCategoryModel from "../models/DonationCategoryModel.js";
 import prasadRateModel from "../models/PrasadRateModel.js";
 import {
   applyCategoryV2Entitlement,
+  applyMahaprasadFulfillment,
   calculateCategoryV2Entitlement,
   categoryAllowsGramCollection,
   categoryUsesMinimumAmount,
 } from "./helpers/prasadCalculator.js";
+import {
+  formatStructuredAddress,
+  normalizeDeliveryAddress,
+} from "./helpers/addressFormatter.js";
 
 // HELPER FUNCTIONS (Unchanged)
 //================================================================
@@ -150,10 +155,18 @@ const generateGuestReceiptId = async (method) => {
  */
 const recordGuestDonation = async (req, res) => {
   try {
-    const { donorInfo, list, method, remarks, mahaprasadFulfillment } = req.body;
+    const {
+      donorInfo,
+      list,
+      method,
+      remarks,
+      courierCharge = 0,
+      deliveryAddress,
+      mahaprasadFulfillment,
+    } = req.body;
 
     // --- Validation ---
-    if (!donorInfo || !list || !method) {
+    if (!donorInfo || !Array.isArray(list) || list.length === 0 || !method) {
       return res
         .status(400)
         .json({ success: false, message: "Missing required fields." });
@@ -194,6 +207,20 @@ const recordGuestDonation = async (req, res) => {
     const categoryByName = new Map(
       categories.map((category) => [category.categoryName, category])
     );
+    const unavailableCategory = categories.find(
+      (category) =>
+        category.isActive === false ||
+        (category.categoryCode !== "maa_durga_pratima" &&
+          category.showInRegularDonation === false) ||
+          (category.availableFor?.length > 0 &&
+            !category.availableFor.includes("self"))
+    );
+    if (unavailableCategory) {
+      return res.status(400).json({
+        success: false,
+        message: `${unavailableCategory.categoryName} is not available for this donation.`,
+      });
+    }
     const usesCategoryV2 = categories.every(
       (category) => category.configurationVersion === "category-v2"
     );
@@ -219,16 +246,53 @@ const recordGuestDonation = async (req, res) => {
         message: `${invalidV2Item.category} does not satisfy its configured donation amount rule.`,
       });
     }
+    const invalidPratimaItem = list.find((item) => {
+      const category = categoryByName.get(item.category?.trim());
+      const units = Number(item.number);
+      return (
+        category?.categoryCode === "maa_durga_pratima" &&
+        (!Number.isInteger(units) || units < 1)
+      );
+    });
+    if (invalidPratimaItem) {
+      return res.status(400).json({
+        success: false,
+        message: "Enter a valid Pratima quantity.",
+      });
+    }
     const hasGramCategory =
       usesCategoryV2 &&
       categories.some(categoryAllowsGramCollection);
-    const prasadRate = hasGramCategory
+    const hasPacketCategory =
+      usesCategoryV2 &&
+      categories.some((category) => category.prasadType === "packet");
+    const isPratimaOnly =
+      categories.length === 1 &&
+      categories[0].categoryCode === "maa_durga_pratima";
+    const mahaprasadEligibleAmount = list.reduce((sum, item) => {
+      const category = categoryByName.get(item.category?.trim());
+      return category?.prasadType === "none" ||
+        category?.categoryCode === "maa_durga_pratima"
+        ? sum
+        : sum + (Number(item.amount) || 0);
+    }, 0);
+    const requestedMode =
+      isPratimaOnly || mahaprasadEligibleAmount <= 0
+        ? "none"
+        : mahaprasadFulfillment?.mode;
+    if (!["none", "collection", "courier"].includes(requestedMode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Select a Mahaprasad fulfilment mode.",
+      });
+    }
+    const prasadRate = hasGramCategory || requestedMode === "courier"
       ? await prasadRateModel
           .findOne({ year: { $lte: new Date().getFullYear() } })
           .sort({ year: -1 })
           .lean()
       : null;
-    if (hasGramCategory && !prasadRate) {
+    if ((hasGramCategory || requestedMode === "courier") && !prasadRate) {
       return res.status(400).json({
         success: false,
         message: "The Prasad calculation rate has not been configured.",
@@ -238,42 +302,202 @@ const recordGuestDonation = async (req, res) => {
     let prasadEntitlement = usesCategoryV2
       ? calculateCategoryV2Entitlement(normalizedList, categories, prasadRate)
       : undefined;
-    let selectedPrasadType;
+    let selectedPrasadType = "none";
+    let normalizedDeliveryAddress;
+    let normalizedCourierCharge = 0;
     if (usesCategoryV2) {
       const availableTypes = [
-        categories.some(categoryAllowsGramCollection)
-          ? "halwa"
-          : null,
-        categories.some((category) => category.prasadType === "packet")
-          ? "packet"
-          : null,
+        hasGramCategory ? "halwa" : null,
+        hasPacketCategory ? "packet" : null,
       ].filter(Boolean);
-      selectedPrasadType =
-        availableTypes.length === 1
-          ? availableTypes[0]
-          : mahaprasadFulfillment?.type;
+
+      if (requestedMode === "courier") {
+        const minimumCourierDonationAmount =
+          Number(prasadRate?.minimumCourierDonationAmount) || 0;
+        if (mahaprasadEligibleAmount < minimumCourierDonationAmount) {
+          return res.status(400).json({
+            success: false,
+            message: `Courier delivery requires a Prasad-eligible donation of at least ₹${minimumCourierDonationAmount.toLocaleString("en-IN")}.`,
+          });
+        }
+        normalizedDeliveryAddress = normalizeDeliveryAddress(deliveryAddress);
+        const unavailableLocations = new Set([
+          "in_manpur",
+          "in_gaya_outside_manpur",
+        ]);
+        if (
+          !normalizedDeliveryAddress.currlocation ||
+          unavailableLocations.has(normalizedDeliveryAddress.currlocation)
+        ) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Courier is unavailable for the selected delivery region.",
+          });
+        }
+        const requiredAddressFields = [
+          "country",
+          "city",
+          "pin",
+          "street",
+        ];
+        if (normalizedDeliveryAddress.currlocation !== "outside_india") {
+          requiredAddressFields.push("state");
+        }
+        const missingAddressField = requiredAddressFields.find(
+          (field) => !normalizedDeliveryAddress[field]
+        );
+        if (missingAddressField) {
+          return res.status(400).json({
+            success: false,
+            message: `Complete the ${missingAddressField} field in the delivery address.`,
+          });
+        }
+        if (
+          normalizedDeliveryAddress.currlocation !== "outside_india" &&
+          !/^\d{6}$/.test(normalizedDeliveryAddress.pin)
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "PIN Code must be exactly 6 digits.",
+          });
+        }
+        selectedPrasadType = "packet";
+        normalizedCourierCharge = Math.max(0, Number(courierCharge) || 0);
+        prasadEntitlement = {
+          ...prasadEntitlement,
+          eligibleAmount: mahaprasadEligibleAmount,
+          grams: 0,
+          packets: 1,
+          minimumCourierDonationAmount,
+        };
+        applyCategoryV2Entitlement(
+          normalizedList,
+          categories,
+          prasadEntitlement,
+          { forceCourierPacket: true }
+        );
+      } else if (requestedMode === "collection") {
+        selectedPrasadType = mahaprasadFulfillment?.type;
+        if (!availableTypes.includes(selectedPrasadType)) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Select one of the Prasad types supported by the chosen donation categories.",
+          });
+        }
+        prasadEntitlement = {
+          ...prasadEntitlement,
+          eligibleAmount:
+            selectedPrasadType === "halwa"
+              ? prasadEntitlement.eligibleAmount
+              : 0,
+          grams:
+            selectedPrasadType === "halwa" ? prasadEntitlement.grams : 0,
+          packets:
+            selectedPrasadType === "packet" ? prasadEntitlement.packets : 0,
+        };
+        applyCategoryV2Entitlement(
+          normalizedList,
+          categories,
+          prasadEntitlement
+        );
+      } else {
+        prasadEntitlement = {
+          ...prasadEntitlement,
+          eligibleAmount: 0,
+          grams: 0,
+          packets: 0,
+        };
+        applyCategoryV2Entitlement(
+          normalizedList,
+          categories,
+          prasadEntitlement
+        );
+      }
+    } else if (requestedMode === "courier") {
+      const minimumCourierDonationAmount =
+        Number(prasadRate?.minimumCourierDonationAmount) || 0;
+      if (mahaprasadEligibleAmount < minimumCourierDonationAmount) {
+        return res.status(400).json({
+          success: false,
+          message: `Courier delivery requires a Prasad-eligible donation of at least ₹${minimumCourierDonationAmount.toLocaleString("en-IN")}.`,
+        });
+      }
+      normalizedDeliveryAddress = normalizeDeliveryAddress(deliveryAddress);
       if (
-        availableTypes.length > 0 &&
-        !availableTypes.includes(selectedPrasadType)
+        !normalizedDeliveryAddress.currlocation ||
+        ["in_manpur", "in_gaya_outside_manpur"].includes(
+          normalizedDeliveryAddress.currlocation
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Courier is unavailable for the selected delivery region.",
+        });
+      }
+      const requiredAddressFields = ["country", "city", "pin", "street"];
+      if (normalizedDeliveryAddress.currlocation !== "outside_india") {
+        requiredAddressFields.push("state");
+      }
+      const missingAddressField = requiredAddressFields.find(
+        (field) => !normalizedDeliveryAddress[field]
+      );
+      if (missingAddressField) {
+        return res.status(400).json({
+          success: false,
+          message: `Complete the ${missingAddressField} field in the delivery address.`,
+        });
+      }
+      if (
+        normalizedDeliveryAddress.currlocation !== "outside_india" &&
+        !/^\d{6}$/.test(normalizedDeliveryAddress.pin)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "PIN Code must be exactly 6 digits.",
+        });
+      }
+      selectedPrasadType = "packet";
+      normalizedCourierCharge = Math.max(0, Number(courierCharge) || 0);
+      normalizedList.forEach((item) => {
+        item.isPacket = false;
+        item.quantity = 0;
+      });
+      const packetItem = normalizedList.find(
+        (item) => !item.category?.toLowerCase().includes("pratima")
+      );
+      if (packetItem) {
+        packetItem.isPacket = true;
+        packetItem.quantity = 1;
+      }
+    } else if (requestedMode === "collection") {
+      selectedPrasadType = mahaprasadFulfillment?.type;
+      const hasPacketEligibleCategory = categories.some(
+        (category) =>
+          category.packet ||
+          category.categoryName.toLowerCase().includes("professional")
+      );
+      if (
+        !["halwa", "packet"].includes(selectedPrasadType) ||
+        (selectedPrasadType === "packet" && !hasPacketEligibleCategory)
       ) {
         return res.status(400).json({
           success: false,
           message:
-            "Select one of the Prasad types supported by the chosen donation categories.",
+            "Select a Mahaprasad type supported by the chosen donation categories.",
         });
       }
-      prasadEntitlement = {
-        ...prasadEntitlement,
-        eligibleAmount:
-          selectedPrasadType === "halwa"
-            ? prasadEntitlement.eligibleAmount
-            : 0,
-        grams:
-          selectedPrasadType === "halwa" ? prasadEntitlement.grams : 0,
-        packets:
-          selectedPrasadType === "packet" ? prasadEntitlement.packets : 0,
-      };
-      applyCategoryV2Entitlement(normalizedList, categories, prasadEntitlement);
+    }
+    if (!usesCategoryV2) {
+      applyMahaprasadFulfillment({
+        donatedAs: "self",
+        list: normalizedList,
+        mahaprasadFulfillment: {
+          mode: requestedMode,
+          type: selectedPrasadType,
+        },
+      });
     }
     const categorySnapshots = usesCategoryV2
       ? normalizedList.map((item) => {
@@ -335,17 +559,21 @@ const recordGuestDonation = async (req, res) => {
         list: normalizedList,
         amount: totalAmount,
         method,
+        courierCharge: normalizedCourierCharge,
         remarks,
+        postalAddress:
+          requestedMode === "courier"
+            ? formatStructuredAddress(normalizedDeliveryAddress)
+            : formatStructuredAddress(guest.address || donorInfo.address || {}),
+        deliveryAddress: normalizedDeliveryAddress,
         receiptId,
         calculationVersion: usesCategoryV2 ? "category-v2" : "legacy-v1",
         prasadEntitlement,
         categorySnapshots,
-        mahaprasadFulfillment: usesCategoryV2
-          ? {
-              mode: selectedPrasadType ? "collection" : "none",
-              type: selectedPrasadType || "none",
-            }
-          : undefined,
+        mahaprasadFulfillment: {
+          mode: requestedMode,
+          type: selectedPrasadType,
+        },
         // Using a generic transactionId for manual entries
         transactionId: `${method
           .replace(" ", "_")
