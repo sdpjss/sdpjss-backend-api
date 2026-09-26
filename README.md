@@ -52,6 +52,9 @@ CLOUDINARY_SECRET_KEY=<api-secret>
 # Razorpay and reCAPTCHA
 RAZORPAY_KEY_ID=<test-key-id>
 RAZORPAY_KEY_SECRET=<test-key-secret>
+RAZORPAY_WEBHOOK_SECRET=<separate-webhook-secret>
+RAZORPAY_SETTLEMENT_SYNC_ENABLED=true
+RAZORPAY_SETTLEMENT_SYNC_INTERVAL_HOURS=6
 CURRENCY=INR
 RECAPTCHA_SECRET_KEY=<secret-key>
 
@@ -78,6 +81,9 @@ EMAIL_PASSWORD=<email-app-password>
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Superadmin login | Use local/test credentials during development |
 | `CLOUDINARY_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_SECRET_KEY` | Uploads | Prefer a non-production account |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Donations | Use matching test-mode credentials |
+| `RAZORPAY_WEBHOOK_SECRET` | Settlement webhooks | Must match the secret configured for the Razorpay webhook |
+| `RAZORPAY_SETTLEMENT_SYNC_ENABLED` | Settlement reconciliation | Defaults to `true`; set to `false` to disable scheduled catch-up |
+| `RAZORPAY_SETTLEMENT_SYNC_INTERVAL_HOURS` | Settlement reconciliation | Optional; defaults to `6` hours |
 | `CURRENCY` | Payments | Payment creation defaults to `INR` |
 | `RECAPTCHA_SECRET_KEY` | Public forms | Must match the frontend site key |
 | `EMAIL_USERS`, `EMAIL_PASSWORDS` | Transactional email | Matching comma-separated lists required during initialization |
@@ -145,6 +151,7 @@ backend/
 | `/api/c` | Public/common operations, notices, and contact form |
 | `/api/additional` | Guest users, guest donations, and related operations |
 | `/api/todopages` | Administrative task pages |
+| `/api/webhooks/razorpay` | Signed Razorpay settlement notifications |
 | `/public` | Static files served by Express |
 
 ## Authentication and Authorization

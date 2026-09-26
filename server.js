@@ -10,6 +10,8 @@ import commonRouter from "./routes/commonRoute.js";
 import khandanRouter from "./routes/khandanRoute.js";
 import additionalRouter from "./routes/additionalRoute.js";
 import todoRouter from "./routes/todoRoute.js";
+import { handleRazorpayWebhook } from "./controllers/settlementController.js";
+import { syncRecentSettlements } from "./services/razorpaySettlementService.js";
 
 //app config
 const app = express();
@@ -45,6 +47,13 @@ const noCache = (req, res, next) => {
   next();
 };
 
+// Razorpay signatures must be generated from the unchanged raw request body.
+app.post(
+  "/api/webhooks/razorpay",
+  express.raw({ type: "application/json" }),
+  handleRazorpayWebhook
+);
+
 //middlewares
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -68,3 +77,37 @@ app.get("/", (req, res) => {
 });
 
 app.listen(port, () => console.log("Server Started", port));
+
+const settlementSyncEnabled =
+  process.env.RAZORPAY_SETTLEMENT_SYNC_ENABLED !== "false";
+const configuredIntervalHours = Number(
+  process.env.RAZORPAY_SETTLEMENT_SYNC_INTERVAL_HOURS || 6
+);
+const settlementSyncIntervalMs =
+  (Number.isFinite(configuredIntervalHours) && configuredIntervalHours > 0
+    ? configuredIntervalHours
+    : 6) *
+  60 *
+  60 *
+  1000;
+
+const runScheduledSettlementSync = async () => {
+  try {
+    await syncRecentSettlements();
+  } catch (error) {
+    console.error(
+      "Scheduled Razorpay settlement synchronization failed:",
+      error?.error?.description || error.message
+    );
+  }
+};
+
+if (settlementSyncEnabled) {
+  const initialSyncTimer = setTimeout(runScheduledSettlementSync, 60 * 1000);
+  initialSyncTimer.unref();
+  const settlementSyncTimer = setInterval(
+    runScheduledSettlementSync,
+    settlementSyncIntervalMs
+  );
+  settlementSyncTimer.unref();
+}

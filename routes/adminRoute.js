@@ -77,6 +77,10 @@ import {
   getPrasadRate,
   upsertPrasadRate,
 } from "../controllers/prasadRateController.js";
+import {
+  getRazorpaySettlements,
+  synchronizeRazorpaySettlements,
+} from "../controllers/settlementController.js";
 
 const adminRouter = express.Router();
 
@@ -102,6 +106,16 @@ adminRouter.put("/update-notice/:id", authAdmin, updateNotice);
 adminRouter.delete("/delete-notice/:id", authAdmin, deleteNotice);
 
 adminRouter.get("/donation-list", authAdmin, getDonationList);
+adminRouter.get(
+  "/razorpay-settlements",
+  authAdmin,
+  getRazorpaySettlements
+);
+adminRouter.post(
+  "/razorpay-settlements/sync",
+  authAdmin,
+  synchronizeRazorpaySettlements
+);
 adminRouter.put(
   "/donations/:donationId/fulfillment",
   authAdmin,
