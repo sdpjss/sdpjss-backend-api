@@ -3008,6 +3008,7 @@ const createDonationOrder = async (req, res) => {
       list,
       amount,
       method,
+      transactionId,
       courierCharge,
       remarks,
       postalAddress,
@@ -3440,11 +3441,22 @@ const createDonationOrder = async (req, res) => {
 
     // --- The child creation/update logic has been REMOVED from here ---
 
-    if (["Cash", "QR Code"].includes(method)) {
+    const isAdminRecordedOnlinePayment = method === "Online" && req.adminId;
+    if (["Cash", "QR Code"].includes(method) || isAdminRecordedOnlinePayment) {
       const donationType = isMaaDurgaPratimaDonation
         ? "maa_durga_pratima"
         : "regular";
       const receiptId = await generateReceiptId(method, "donation");
+      const transactionPrefix =
+        method === "Cash"
+          ? "CASH"
+          : method === "QR Code"
+            ? "QR_CODE"
+            : "ADMIN_ONLINE";
+      const adminProvidedTransactionId =
+        req.adminId && ["QR Code", "Online"].includes(method)
+          ? String(transactionId || "").trim()
+          : "";
       const donation = await donationModel.create({
         userId,
         list: normalizedList,
@@ -3452,7 +3464,8 @@ const createDonationOrder = async (req, res) => {
         method,
         courierCharge: normalizedCourierCharge,
         remarks,
-        transactionId: `${method === "Cash" ? "CASH" : "QR_CODE"}_${Date.now()}`,
+        transactionId:
+          adminProvidedTransactionId || `${transactionPrefix}_${Date.now()}`,
         paymentStatus: "completed",
         postalAddress: normalizedPostalAddress,
         deliveryAddress: normalizedDeliveryAddress,

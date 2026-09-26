@@ -716,10 +716,13 @@ const getGuestDonationsById = async (req, res) => {
     }
 
     const donations = await guestDonationModel
-      .find({ guestId: guestId })
+      .find({
+        guestId: guestId,
+        paymentStatus: { $in: ["completed", "pending"] },
+      })
       .sort({ createdAt: -1 }) // Get the most recent ones first
       .limit(2) // Limit to the last 2
-      .select("createdAt list amount"); // Select only the fields we need
+      .select("createdAt list amount paymentStatus"); // Select only the fields we need
 
     if (!donations) {
       return res.json({ success: true, donations: [] }); // Send empty array if none found
