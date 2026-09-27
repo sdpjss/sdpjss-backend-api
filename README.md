@@ -55,6 +55,12 @@ RAZORPAY_KEY_SECRET=<test-key-secret>
 RAZORPAY_WEBHOOK_SECRET=<separate-webhook-secret>
 RAZORPAY_SETTLEMENT_SYNC_ENABLED=true
 RAZORPAY_SETTLEMENT_SYNC_INTERVAL_HOURS=6
+RAZORPAY_PAYMENT_RECONCILIATION_ENABLED=true
+RAZORPAY_PAYMENT_RECONCILIATION_INTERVAL_MINUTES=60
+RAZORPAY_PAYMENT_FAILURE_AFTER_HOURS=24
+RAZORPAY_NO_ATTEMPT_FAILURE_AFTER_HOURS=48
+RAZORPAY_LATE_CAPTURE_LOOKBACK_DAYS=7
+RAZORPAY_PAYMENT_RECONCILIATION_BATCH_SIZE=100
 CURRENCY=INR
 RECAPTCHA_SECRET_KEY=<secret-key>
 
@@ -84,6 +90,12 @@ EMAIL_PASSWORD=<email-app-password>
 | `RAZORPAY_WEBHOOK_SECRET` | Settlement webhooks | Must match the secret configured for the Razorpay webhook |
 | `RAZORPAY_SETTLEMENT_SYNC_ENABLED` | Settlement reconciliation | Defaults to `true`; set to `false` to disable scheduled catch-up |
 | `RAZORPAY_SETTLEMENT_SYNC_INTERVAL_HOURS` | Settlement reconciliation | Optional; defaults to `6` hours |
+| `RAZORPAY_PAYMENT_RECONCILIATION_ENABLED` | Pending payment reconciliation | Defaults to `true`; set to `false` to disable the scheduled job |
+| `RAZORPAY_PAYMENT_RECONCILIATION_INTERVAL_MINUTES` | Pending payment reconciliation | Optional; defaults to `60` minutes |
+| `RAZORPAY_PAYMENT_FAILURE_AFTER_HOURS` | Pending payment reconciliation | Mark an order failed only when all attempts have failed and it is at least this old; defaults to `24` hours |
+| `RAZORPAY_NO_ATTEMPT_FAILURE_AFTER_HOURS` | Pending payment reconciliation | Mark an order with no attempts failed after this age; defaults to `48` hours |
+| `RAZORPAY_LATE_CAPTURE_LOOKBACK_DAYS` | Pending payment reconciliation | Recheck recently failed orders for delayed captures; defaults to `7` days |
+| `RAZORPAY_PAYMENT_RECONCILIATION_BATCH_SIZE` | Pending payment reconciliation | Maximum donations checked per scheduled run; defaults to `100` |
 | `CURRENCY` | Payments | Payment creation defaults to `INR` |
 | `RECAPTCHA_SECRET_KEY` | Public forms | Must match the frontend site key |
 | `EMAIL_USERS`, `EMAIL_PASSWORDS` | Transactional email | Matching comma-separated lists required during initialization |

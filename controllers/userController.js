@@ -3989,8 +3989,244 @@ const listUserFeatures = async (req, res) => {
   }
 };
 
+const getPositiveNumber = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const paymentFailureAfterHours = getPositiveNumber(
+  process.env.RAZORPAY_PAYMENT_FAILURE_AFTER_HOURS,
+  24
+);
+const noAttemptFailureAfterHours = getPositiveNumber(
+  process.env.RAZORPAY_NO_ATTEMPT_FAILURE_AFTER_HOURS,
+  48
+);
+const lateCaptureLookbackDays = getPositiveNumber(
+  process.env.RAZORPAY_LATE_CAPTURE_LOOKBACK_DAYS,
+  7
+);
+const paymentReconciliationBatchSize = Math.floor(
+  getPositiveNumber(process.env.RAZORPAY_PAYMENT_RECONCILIATION_BATCH_SIZE, 100)
+);
+const reconciliationLockMilliseconds = 5 * 60 * 1000;
+
+const hoursSince = (date) =>
+  (Date.now() - new Date(date).getTime()) / (60 * 60 * 1000);
+
+const claimDonationForReconciliation = async (donationId, allowedStatuses) => {
+  const now = new Date();
+  return donationModel.findOneAndUpdate(
+    {
+      _id: donationId,
+      paymentStatus: { $in: allowedStatuses },
+      razorpayOrderId: { $exists: true, $ne: "" },
+      $or: [
+        { paymentReconciliationLockUntil: { $exists: false } },
+        { paymentReconciliationLockUntil: null },
+        { paymentReconciliationLockUntil: { $lte: now } },
+      ],
+    },
+    {
+      $set: {
+        paymentReconciliationLockUntil: new Date(
+          now.getTime() + reconciliationLockMilliseconds
+        ),
+      },
+    },
+    { new: true }
+  );
+};
+
+const releaseDonationReconciliationLock = async (donationId) => {
+  await donationModel.updateOne(
+    { _id: donationId },
+    { $unset: { paymentReconciliationLockUntil: 1 } }
+  );
+};
+
+const reconcileDonationWithRazorpay = async (donation) => {
+  const reconciledAt = new Date();
+  let payments;
+
+  try {
+    payments = await razorpayInstance.orders.fetchPayments(
+      donation.razorpayOrderId
+    );
+  } catch (error) {
+    await donationModel.updateOne(
+      { _id: donation._id },
+      {
+        $set: {
+          lastPaymentReconciledAt: reconciledAt,
+          razorpayLastStatus: "lookup_error",
+          ...(donation.paymentStatus === "pending"
+            ? { paymentStatusReason: "razorpay_lookup_error" }
+            : {}),
+        },
+        $inc: { paymentReconciliationAttempts: 1 },
+      }
+    );
+    throw error;
+  }
+
+  if (!payments || !Array.isArray(payments.items)) {
+    throw new Error("Razorpay returned an invalid payment list");
+  }
+
+  const paymentItems = payments.items;
+  const statuses = paymentItems
+    .map((payment) => String(payment.status || "").toLowerCase())
+    .filter(Boolean);
+  const capturedPayment = paymentItems.find(
+    (payment) => String(payment.status).toLowerCase() === "captured"
+  );
+  const commonUpdate = {
+    lastPaymentReconciledAt: reconciledAt,
+    razorpayLastStatus: statuses.length ? statuses.join(",") : "no_attempt",
+  };
+
+  if (capturedPayment) {
+    const receiptId =
+      donation.receiptId || (await generateReceiptId("Online", "donation"));
+    await donationModel.updateOne(
+      { _id: donation._id, paymentStatus: { $in: ["pending", "failed"] } },
+      {
+        $set: {
+          ...commonUpdate,
+          paymentStatus: "completed",
+          paymentStatusReason: "razorpay_payment_captured",
+          transactionId: capturedPayment.id,
+          receiptId,
+        },
+        $inc: { paymentReconciliationAttempts: 1 },
+        $unset: {
+          razorpayOrderId: 1,
+          paymentFailedAt: 1,
+          paymentReconciliationLockUntil: 1,
+        },
+      }
+    );
+    return { status: "completed", receiptId, reason: "captured" };
+  }
+
+  const donationAgeHours = hoursSince(donation.createdAt);
+  let paymentStatus = "pending";
+  let paymentStatusReason;
+
+  if (paymentItems.length === 0) {
+    if (donationAgeHours >= noAttemptFailureAfterHours) {
+      paymentStatus = "failed";
+      paymentStatusReason = "no_payment_attempt";
+    } else {
+      paymentStatusReason = "awaiting_payment_attempt";
+    }
+  } else if (
+    statuses.some((status) => status === "authorized" || status === "created")
+  ) {
+    paymentStatusReason = statuses.includes("authorized")
+      ? "razorpay_payment_authorized"
+      : "razorpay_payment_created";
+  } else if (
+    statuses.length === paymentItems.length &&
+    statuses.every((status) => status === "failed")
+  ) {
+    if (donationAgeHours >= paymentFailureAfterHours) {
+      paymentStatus = "failed";
+      paymentStatusReason = "all_payment_attempts_failed";
+    } else {
+      paymentStatusReason = "awaiting_failure_grace_period";
+    }
+  } else {
+    paymentStatusReason = "razorpay_payment_status_unresolved";
+  }
+
+  await donationModel.updateOne(
+    { _id: donation._id, paymentStatus: { $in: ["pending", "failed"] } },
+    {
+      $set: {
+        ...commonUpdate,
+        paymentStatus,
+        paymentStatusReason,
+        ...(paymentStatus === "failed" && donation.paymentStatus !== "failed"
+          ? { paymentFailedAt: reconciledAt }
+          : {}),
+      },
+      $inc: { paymentReconciliationAttempts: 1 },
+      $unset: {
+        paymentReconciliationLockUntil: 1,
+        ...(paymentStatus === "pending" ? { paymentFailedAt: 1 } : {}),
+      },
+    }
+  );
+
+  return { status: paymentStatus, reason: paymentStatusReason };
+};
+
+export const reconcilePendingDonations = async () => {
+  const now = new Date();
+  const pendingCutoff = new Date(
+    now.getTime() -
+      Math.min(paymentFailureAfterHours, noAttemptFailureAfterHours) *
+        60 *
+        60 *
+        1000
+  );
+  const lateCaptureCutoff = new Date(
+    now.getTime() - lateCaptureLookbackDays * 24 * 60 * 60 * 1000
+  );
+  const candidates = await donationModel
+    .find({
+      razorpayOrderId: { $exists: true, $ne: "" },
+      $or: [
+        { paymentStatus: "pending", createdAt: { $lte: pendingCutoff } },
+        {
+          paymentStatus: "failed",
+          $or: [
+            { paymentFailedAt: { $gte: lateCaptureCutoff } },
+            {
+              paymentFailedAt: { $exists: false },
+              updatedAt: { $gte: lateCaptureCutoff },
+            },
+          ],
+        },
+      ],
+    })
+    .select("_id")
+    .sort({ lastPaymentReconciledAt: 1, createdAt: 1 })
+    .limit(paymentReconciliationBatchSize)
+    .lean();
+
+  const summary = { checked: 0, completed: 0, failed: 0, pending: 0, errors: 0 };
+  for (const candidate of candidates) {
+    const donation = await claimDonationForReconciliation(candidate._id, [
+      "pending",
+      "failed",
+    ]);
+    if (!donation) continue;
+
+    summary.checked += 1;
+    try {
+      const result = await reconcileDonationWithRazorpay(donation);
+      summary[result.status] += 1;
+    } catch (error) {
+      summary.errors += 1;
+      console.error(
+        `Razorpay reconciliation failed for donation ${donation._id}:`,
+        error?.error?.description || error.message
+      );
+    } finally {
+      await releaseDonationReconciliationLock(donation._id);
+    }
+  }
+
+  console.log("Scheduled Razorpay payment reconciliation completed:", summary);
+  return summary;
+};
+
 export const reconcileSingleDonation = async (req, res) => {
   const { donationId } = req.body;
+  let claimedDonationId;
 
   if (!donationId) {
     return res
@@ -3999,17 +4235,18 @@ export const reconcileSingleDonation = async (req, res) => {
   }
 
   try {
-    // 1. Find the donation in your database
-    const donation = await donationModel.findById(donationId);
+    const existingDonation = await donationModel.findById(donationId);
 
-    if (!donation) {
+    if (!existingDonation) {
       return res
         .status(404)
         .json({ success: false, message: "Donation not found." });
     }
 
-    // 2. Ensure it's a pending online payment
-    if (donation.paymentStatus !== "pending" || !donation.razorpayOrderId) {
+    if (
+      existingDonation.paymentStatus !== "pending" ||
+      !existingDonation.razorpayOrderId
+    ) {
       return res.status(400).json({
         success: false,
         message:
@@ -4017,43 +4254,34 @@ export const reconcileSingleDonation = async (req, res) => {
       });
     }
 
-    const orderId = donation.razorpayOrderId;
-
-    // 3. Fetch payment details for the order from Razorpay
-    const payments = await razorpayInstance.orders.fetchPayments(orderId);
-
-    if (!payments || !Array.isArray(payments.items) || payments.items.length === 0) {
-      return res.json({
+    const donation = await claimDonationForReconciliation(donationId, [
+      "pending",
+    ]);
+    if (!donation) {
+      return res.status(409).json({
         success: false,
-        message:
-          "No payment attempt was found for this order. The donation remains Pending.",
+        message: "This donation is already being reconciled. Please try again.",
       });
     }
+    claimedDonationId = donation._id;
 
-    // 4. Find a successful payment
-    const capturedPayment = payments.items.find((p) => p.status === "captured");
-
-    if (capturedPayment) {
-      // 5. Payment was successful! Update your database.
-      const receiptId = await generateReceiptId("Online", "donation");
-
-      await donationModel.findByIdAndUpdate(donation._id, {
-        paymentStatus: "completed",
-        transactionId: capturedPayment.id,
-        receiptId: receiptId,
-        $unset: { razorpayOrderId: 1 }, // Clean up the temporary order ID
-      });
-
+    const result = await reconcileDonationWithRazorpay(donation);
+    if (result.status === "completed") {
       return res.json({
         success: true,
-        message: `Successfully reconciled. Receipt: ${receiptId}`,
+        status: result.status,
+        message: `Successfully reconciled. Receipt: ${result.receiptId}`,
       });
     }
 
     return res.json({
       success: false,
+      status: result.status,
+      reason: result.reason,
       message:
-        "No captured payment was found for this order. The donation remains Pending.",
+        result.status === "failed"
+          ? "No successful payment was found within the allowed period. The donation has been marked Failed."
+          : "No captured payment was found for this order. The donation remains Pending.",
     });
   } catch (error) {
     console.error("Error during manual reconciliation:", error);
@@ -4068,6 +4296,13 @@ export const reconcileSingleDonation = async (req, res) => {
       message:
         "An internal server error occurred. The donation remains Pending.",
     });
+  } finally {
+    if (claimedDonationId) {
+      await releaseDonationReconciliationLock(claimedDonationId).catch(
+        (error) =>
+          console.error("Unable to release payment reconciliation lock:", error)
+      );
+    }
   }
 };
 
