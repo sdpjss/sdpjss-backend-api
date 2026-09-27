@@ -12,6 +12,7 @@ import additionalRouter from "./routes/additionalRoute.js";
 import todoRouter from "./routes/todoRoute.js";
 import { handleRazorpayWebhook } from "./controllers/settlementController.js";
 import { syncRecentSettlements } from "./services/razorpaySettlementService.js";
+import { reconcilePendingDonations } from "./controllers/userController.js";
 
 //app config
 const app = express();
@@ -110,4 +111,41 @@ if (settlementSyncEnabled) {
     settlementSyncIntervalMs
   );
   settlementSyncTimer.unref();
+}
+
+const paymentReconciliationEnabled =
+  process.env.RAZORPAY_PAYMENT_RECONCILIATION_ENABLED !== "false";
+const configuredPaymentReconciliationMinutes = Number(
+  process.env.RAZORPAY_PAYMENT_RECONCILIATION_INTERVAL_MINUTES || 60
+);
+const paymentReconciliationIntervalMs =
+  (Number.isFinite(configuredPaymentReconciliationMinutes) &&
+  configuredPaymentReconciliationMinutes > 0
+    ? configuredPaymentReconciliationMinutes
+    : 60) *
+  60 *
+  1000;
+
+const runScheduledPaymentReconciliation = async () => {
+  try {
+    await reconcilePendingDonations();
+  } catch (error) {
+    console.error(
+      "Scheduled Razorpay payment reconciliation failed:",
+      error?.error?.description || error.message
+    );
+  }
+};
+
+if (paymentReconciliationEnabled) {
+  const initialPaymentReconciliationTimer = setTimeout(
+    runScheduledPaymentReconciliation,
+    60 * 1000
+  );
+  initialPaymentReconciliationTimer.unref();
+  const paymentReconciliationTimer = setInterval(
+    runScheduledPaymentReconciliation,
+    paymentReconciliationIntervalMs
+  );
+  paymentReconciliationTimer.unref();
 }

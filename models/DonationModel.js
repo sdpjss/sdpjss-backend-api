@@ -157,9 +157,17 @@ const donationSchema = new mongoose.Schema(
       enum: ["pending", "completed", "failed"],
       default: "pending",
     },
+    paymentStatusReason: { type: String, trim: true },
+    paymentFailedAt: { type: Date },
+    razorpayLastStatus: { type: String, trim: true },
+    lastPaymentReconciledAt: { type: Date },
+    paymentReconciliationAttempts: { type: Number, default: 0, min: 0 },
+    paymentReconciliationLockUntil: { type: Date },
   },
   { timestamps: true }
 );
+
+donationSchema.index({ paymentStatus: 1, createdAt: 1, razorpayOrderId: 1 });
 
 const donationModel =
   mongoose.models.donation || mongoose.model("donation", donationSchema);
