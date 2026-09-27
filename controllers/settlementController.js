@@ -75,12 +75,6 @@ const getRazorpaySettlements = async (req, res) => {
     const responseSettlements = settlements.map((settlement) => {
       const settlementTransactions =
         transactionsBySettlement.get(settlement.razorpaySettlementId) || [];
-      const grossPaymentAmountPaise = settlementTransactions
-        .filter((transaction) => transaction.type === "payment")
-        .reduce(
-          (sum, transaction) => sum + toNumber(transaction.grossAmountPaise),
-          0
-        );
       const isFuture =
         settlement.status === "created" ||
         (settlement.scheduledAt
@@ -91,7 +85,6 @@ const getRazorpaySettlements = async (req, res) => {
         id: settlement.razorpaySettlementId,
         status: settlement.status,
         amountPaise: settlement.amountPaise,
-        grossPaymentAmountPaise,
         actualSettledAmountPaise:
           settlement.status === "processed" && !isFuture
             ? settlement.amountPaise
@@ -199,11 +192,6 @@ const getRazorpaySettlements = async (req, res) => {
       generatedAt,
       dataSource: "database",
       summary: {
-        grossSettledPaymentAmountPaise: processedSettlements.reduce(
-          (sum, settlement) =>
-            sum + toNumber(settlement.grossPaymentAmountPaise),
-          0
-        ),
         actualSettledAmountPaise: processedSettlements.reduce(
           (sum, settlement) =>
             sum + toNumber(settlement.actualSettledAmountPaise),
