@@ -13,6 +13,7 @@ import {
   LEGACY_DONATION_RATE_YEAR,
 } from "../config/donationRates.js";
 import courierChargeModel from "../models/CourierChargesModel.js";
+import yearlyDonationExemptionModel from "../models/YearlyDonationExemptionModel.js";
 
 import adminModel from "../models/AdminModel.js";
 import featureModel from "../models/FeatureModel.js"; // Make sure to import your feature model
@@ -435,6 +436,292 @@ const getDonationList = async (req, res) => {
   } catch (error) {
     console.log("Error in getDonationList:", error);
     res.json({ success: false, message: error.message });
+  }
+};
+
+const getIndiaCalendarYear = () =>
+  Number(
+    new Intl.DateTimeFormat("en", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+    }).format(new Date())
+  );
+
+const getIndiaYearRange = (year) => ({
+  start: new Date(Date.UTC(year, 0, 1) - 5.5 * 60 * 60 * 1000),
+  end: new Date(Date.UTC(year + 1, 0, 1) - 5.5 * 60 * 60 * 1000),
+});
+
+const parseDefaulterYear = (value) => {
+  const currentYear = getIndiaCalendarYear();
+  const year = Number(value || currentYear);
+  return Number.isInteger(year) && year >= 2000 && year <= currentYear
+    ? year
+    : null;
+};
+
+const isPratimaCategory = (categoryName, pratimaCategoryNames) => {
+  const normalizedName = String(categoryName || "").trim().toLowerCase();
+  return (
+    pratimaCategoryNames.has(normalizedName) ||
+    normalizedName.includes("pratima")
+  );
+};
+
+const getYearlyDonationDefaulters = async (req, res) => {
+  try {
+    const year = parseDefaulterYear(req.query.year);
+    if (!year) {
+      return res.status(400).json({
+        success: false,
+        message: `Year must be between 2000 and ${getIndiaCalendarYear()}.`,
+      });
+    }
+
+    const { start, end } = getIndiaYearRange(year);
+    const members = await userModel
+      .find({
+        islive: true,
+        isApproved: "approved",
+        createdAt: { $lt: end },
+      })
+      .select("fullname id fatherName marriage contact profession createdAt")
+      .sort({ fullname: 1 })
+      .lean();
+    const memberIds = members.map((member) => member._id);
+
+    const [donations, exemptions, previousExemptions, pratimaCategories] =
+      await Promise.all([
+        donationModel
+          .find({
+            userId: { $in: memberIds },
+            paymentStatus: "completed",
+            refunded: { $ne: true },
+            donatedAs: { $in: ["self", null] },
+            createdAt: { $gte: start, $lt: end },
+          })
+          .select("userId list receiptId transactionId createdAt")
+          .lean(),
+        yearlyDonationExemptionModel
+          .find({ year, userId: { $in: memberIds } })
+          .lean(),
+        yearlyDonationExemptionModel
+          .find({ year: { $lt: year }, userId: { $in: memberIds } })
+          .sort({ year: -1 })
+          .lean(),
+        donationCategoryModel
+          .find({ categoryCode: "maa_durga_pratima" })
+          .select("categoryName")
+          .lean(),
+      ]);
+
+    const pratimaCategoryNames = new Set(
+      pratimaCategories.map((category) =>
+        String(category.categoryName || "").trim().toLowerCase()
+      )
+    );
+    const donationsByUser = new Map();
+    donations.forEach((donation) => {
+      const qualifyingItems = (donation.list || []).filter(
+        (item) => !isPratimaCategory(item.category, pratimaCategoryNames)
+      );
+      if (!qualifyingItems.length) return;
+
+      const userId = String(donation.userId);
+      const summary = donationsByUser.get(userId) || {
+        amount: 0,
+        categories: new Set(),
+        receipts: [],
+      };
+      summary.amount += qualifyingItems.reduce(
+        (total, item) => total + (Number(item.amount) || 0),
+        0
+      );
+      qualifyingItems.forEach((item) => {
+        if (item.category) summary.categories.add(item.category);
+      });
+      summary.receipts.push({
+        receiptId: donation.receiptId || null,
+        transactionId: donation.transactionId || null,
+        donatedAt: donation.createdAt,
+      });
+      donationsByUser.set(userId, summary);
+    });
+
+    const exemptionByUser = new Map(
+      exemptions.map((exemption) => [String(exemption.userId), exemption])
+    );
+    const previousExemptionsByUser = new Map();
+    previousExemptions.forEach((exemption) => {
+      const userId = String(exemption.userId);
+      const history = previousExemptionsByUser.get(userId) || [];
+      history.push({
+        year: exemption.year,
+        reason: exemption.reason,
+        approvedAt: exemption.approvedAt,
+      });
+      previousExemptionsByUser.set(userId, history);
+    });
+
+    const rows = members.map((member) => {
+      const userId = String(member._id);
+      const donation = donationsByUser.get(userId);
+      const exemption = exemptionByUser.get(userId);
+      const status = donation ? "paid" : exemption ? "exempt" : "defaulter";
+      return {
+        userId: member._id,
+        memberId: member.id,
+        name: member.fullname,
+        fatherName: member.fatherName || "",
+        spouseNames: Array.isArray(member.marriage?.spouse)
+          ? member.marriage.spouse.filter(Boolean)
+          : [],
+        contact: {
+          mobileCode: member.contact?.mobileno?.code || "",
+          mobileNumber: member.contact?.mobileno?.number || "",
+          email: member.contact?.email || "",
+        },
+        professionCategory: member.profession?.category || "",
+        status,
+        donation: donation
+          ? {
+              amount: donation.amount,
+              categories: [...donation.categories].sort(),
+              receipts: donation.receipts,
+            }
+          : null,
+        exemption: exemption
+          ? {
+              reason: exemption.reason,
+              approvedAt: exemption.approvedAt,
+              approvedBy: exemption.approvedBy,
+            }
+          : null,
+        previousExemptions: previousExemptionsByUser.get(userId) || [],
+      };
+    });
+
+    const summary = rows.reduce(
+      (result, row) => {
+        result.totalMembers += 1;
+        result[row.status] += 1;
+        if (row.donation) result.donatedAmount += row.donation.amount;
+        return result;
+      },
+      { totalMembers: 0, paid: 0, defaulter: 0, exempt: 0, donatedAmount: 0 }
+    );
+
+    return res.json({
+      success: true,
+      year,
+      currentYear: getIndiaCalendarYear(),
+      summary,
+      rows,
+    });
+  } catch (error) {
+    console.error("Error preparing yearly donation defaulters:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to prepare the yearly donation defaulters report.",
+    });
+  }
+};
+
+const approveYearlyDonationExemption = async (req, res) => {
+  try {
+    const year = parseDefaulterYear(req.body.year);
+    const reason = String(req.body.reason || "").trim();
+    const currentYear = getIndiaCalendarYear();
+
+    if (!year || year !== currentYear) {
+      return res.status(400).json({
+        success: false,
+        message: "Exemptions can only be approved for the current year.",
+      });
+    }
+    if (reason.length < 3 || reason.length > 1000) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide an exemption reason between 3 and 1000 characters.",
+      });
+    }
+
+    const member = await userModel
+      .findOne({
+        _id: req.params.userId,
+        islive: true,
+        isApproved: "approved",
+      })
+      .select("_id fullname")
+      .lean();
+    if (!member) {
+      return res.status(404).json({
+        success: false,
+        message: "Eligible member not found.",
+      });
+    }
+
+    const { start, end } = getIndiaYearRange(year);
+    const [completedDonations, pratimaCategories] = await Promise.all([
+      donationModel
+        .find({
+          userId: member._id,
+          paymentStatus: "completed",
+          refunded: { $ne: true },
+          donatedAs: { $in: ["self", null] },
+          createdAt: { $gte: start, $lt: end },
+        })
+        .select("list")
+        .lean(),
+      donationCategoryModel
+        .find({ categoryCode: "maa_durga_pratima" })
+        .select("categoryName")
+        .lean(),
+    ]);
+    const pratimaCategoryNames = new Set(
+      pratimaCategories.map((category) =>
+        String(category.categoryName || "").trim().toLowerCase()
+      )
+    );
+    const hasYearlyDonation = completedDonations.some((donation) =>
+      (donation.list || []).some(
+        (item) => !isPratimaCategory(item.category, pratimaCategoryNames)
+      )
+    );
+    if (hasYearlyDonation) {
+      return res.status(409).json({
+        success: false,
+        message: `${member.fullname} already has a completed yearly donation for ${year}.`,
+      });
+    }
+
+    const exemption = await yearlyDonationExemptionModel.findOneAndUpdate(
+      { userId: member._id, year },
+      {
+        $set: {
+          reason,
+          approvedBy: String(req.adminId),
+          approvedByRole: req.adminRole,
+          approvedAt: new Date(),
+        },
+      },
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    return res.json({
+      success: true,
+      message: `${member.fullname} is exempted from the ${year} yearly donation.`,
+      exemption,
+    });
+  } catch (error) {
+    if (error?.name === "CastError") {
+      return res.status(400).json({ success: false, message: "Invalid member ID." });
+    }
+    console.error("Error approving yearly donation exemption:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to approve the yearly donation exemption.",
+    });
   }
 };
 
@@ -2211,6 +2498,8 @@ export {
   getJobOpeningList,
   getAdvertisementList,
   getDonationList,
+  getYearlyDonationDefaulters,
+  approveYearlyDonationExemption,
   correctDonationFulfillment,
   getGuestDonationList,
   getFamilyCount,

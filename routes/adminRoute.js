@@ -22,6 +22,7 @@ import {
   getCourierCharges,
   getDonationCount,
   getDonationList,
+  getYearlyDonationDefaulters,
   getFamilyCount,
   getFamilyList,
   getGuestDonationList,
@@ -41,6 +42,7 @@ import {
   updateFeature,
   updateNotice,
   updateUserStatus,
+  approveYearlyDonationExemption,
 } from "../controllers/adminController.js";
 import {
   createKhandan,
@@ -106,6 +108,16 @@ adminRouter.put("/update-notice/:id", authAdmin, updateNotice);
 adminRouter.delete("/delete-notice/:id", authAdmin, deleteNotice);
 
 adminRouter.get("/donation-list", authAdmin, getDonationList);
+adminRouter.get(
+  "/donation-defaulters",
+  authAdmin,
+  getYearlyDonationDefaulters
+);
+adminRouter.put(
+  "/donation-defaulters/:userId/exemption",
+  authAdmin,
+  approveYearlyDonationExemption
+);
 adminRouter.get(
   "/razorpay-settlements",
   authAdmin,
