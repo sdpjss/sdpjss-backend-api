@@ -232,6 +232,132 @@ const getRazorpaySettlements = async (req, res) => {
   }
 };
 
+const getRazorpaySettlementExport = async (req, res) => {
+  try {
+    const validation = validateYear(req.query.year);
+    if (validation.error) {
+      return res.status(400).json({ success: false, message: validation.error });
+    }
+
+    const { year } = validation;
+    const { start: rangeStart } = getPeriodRange(year, 1);
+    const { end: rangeEnd } = getPeriodRange(year, 12);
+    const settlements = await razorpaySettlementModel
+      .find({
+        status: "processed",
+        $or: [
+          { scheduledAt: { $gte: rangeStart, $lt: rangeEnd } },
+          {
+            scheduledAt: null,
+            createdAtRazorpay: { $gte: rangeStart, $lt: rangeEnd },
+          },
+        ],
+      })
+      .select(
+        "razorpaySettlementId amountPaise utr createdAtRazorpay scheduledAt"
+      )
+      .lean();
+
+    const settlementIds = settlements.map(
+      (settlement) => settlement.razorpaySettlementId
+    );
+    const transactions = settlementIds.length
+      ? await razorpaySettlementTransactionModel
+          .find({
+            razorpaySettlementId: { $in: settlementIds },
+            type: "payment",
+            settled: true,
+            donationId: { $ne: null },
+          })
+          .select(
+            "razorpaySettlementId paymentId settlementUtr settledAt donationId receiptId"
+          )
+          .lean()
+      : [];
+
+    const donationIds = [
+      ...new Set(
+        transactions
+          .map((transaction) => transaction.donationId?.toString())
+          .filter(Boolean)
+      ),
+    ];
+    const donations = donationIds.length
+      ? await donationModel
+          .find({ _id: { $in: donationIds } })
+          .select(
+            "receiptId transactionId date createdAt list userId relationName"
+          )
+          .populate("userId", "fullname fatherName contact")
+          .lean()
+      : [];
+
+    const settlementById = new Map(
+      settlements.map((settlement) => [
+        settlement.razorpaySettlementId,
+        settlement,
+      ])
+    );
+    const donationById = new Map(
+      donations.map((donation) => [donation._id.toString(), donation])
+    );
+    const rows = [];
+
+    transactions.forEach((transaction) => {
+      const settlement = settlementById.get(transaction.razorpaySettlementId);
+      const donation = donationById.get(transaction.donationId?.toString());
+      if (!settlement || !donation) return;
+
+      const mobileCode = donation.userId?.contact?.mobileno?.code || "";
+      const mobileNumber = donation.userId?.contact?.mobileno?.number || "";
+      const categories = donation.list?.length ? donation.list : [null];
+
+      categories.forEach((category) => {
+        rows.push({
+          settledAt:
+            transaction.settledAt ||
+            settlement.scheduledAt ||
+            settlement.createdAtRazorpay,
+          settlementId: settlement.razorpaySettlementId,
+          settlementAmount: toNumber(settlement.amountPaise) / 100,
+          bankTransactionId: settlement.utr || transaction.settlementUtr || "",
+          donationReceiptNumber:
+            donation.receiptId || transaction.receiptId || "",
+          donationTransactionId:
+            donation.transactionId || transaction.paymentId || "",
+          donationDate: donation.date || donation.createdAt,
+          donorName: donation.userId?.fullname || "",
+          donorFatherName: donation.userId?.fatherName || "",
+          donorSpouseName: donation.relationName || "",
+          donorMobileNumber: [mobileCode, mobileNumber]
+            .filter(Boolean)
+            .join(" "),
+          donorEmailAddress: donation.userId?.contact?.email || "",
+          donationCategory: category?.category || "",
+          donationCategoryAmount: toNumber(category?.amount),
+        });
+      });
+    });
+
+    rows.sort((first, second) => {
+      const settlementDateDifference =
+        new Date(second.settledAt || 0) - new Date(first.settledAt || 0);
+      if (settlementDateDifference) return settlementDateDifference;
+      return String(first.donationReceiptNumber).localeCompare(
+        String(second.donationReceiptNumber)
+      );
+    });
+
+    return res.json({ success: true, year, rows });
+  } catch (error) {
+    console.error("Error preparing Razorpay settlement export:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to prepare the Razorpay settlement export",
+    });
+  }
+};
+
 const synchronizeRazorpaySettlements = async (req, res) => {
   try {
     const validation = validateYear(req.body?.year || req.query.year);
@@ -372,6 +498,7 @@ const handleRazorpayWebhook = async (req, res) => {
 };
 
 export {
+  getRazorpaySettlementExport,
   getRazorpaySettlements,
   handleRazorpayWebhook,
   synchronizeRazorpaySettlements,
