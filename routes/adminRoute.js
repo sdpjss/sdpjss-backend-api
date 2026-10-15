@@ -80,6 +80,10 @@ import {
   upsertPrasadRate,
 } from "../controllers/prasadRateController.js";
 import {
+  getMahaprasadFulfillmentList,
+  updateMahaprasadFulfillmentStatus,
+} from "../controllers/fulfillmentController.js";
+import {
   getRazorpaySettlements,
   synchronizeRazorpaySettlements,
 } from "../controllers/settlementController.js";
@@ -108,6 +112,16 @@ adminRouter.put("/update-notice/:id", authAdmin, updateNotice);
 adminRouter.delete("/delete-notice/:id", authAdmin, deleteNotice);
 
 adminRouter.get("/donation-list", authAdmin, getDonationList);
+adminRouter.get(
+  "/mahaprasad-fulfillment",
+  authAdmin,
+  getMahaprasadFulfillmentList
+);
+adminRouter.put(
+  "/mahaprasad-fulfillment/:donorType/:donationId",
+  authAdmin,
+  updateMahaprasadFulfillmentStatus
+);
 adminRouter.get(
   "/donation-defaulters",
   authAdmin,

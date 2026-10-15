@@ -918,6 +918,8 @@ const correctDonationFulfillment = async (req, res) => {
     }
 
     const previousValues = getCorrectionValues(donation);
+    const previousFulfillmentStatus = donation.fulfillmentStatus || "pending";
+    const previousTrackingNumber = donation.courierTrackingNumber || "";
     if (normalizedDeliveryAddress) {
       donation.deliveryAddress = normalizedDeliveryAddress;
       donation.postalAddress = formatStructuredAddress(
@@ -962,6 +964,22 @@ const correctDonationFulfillment = async (req, res) => {
       previousValues,
       updatedValues,
     });
+    if (
+      previousFulfillmentStatus !== "pending" ||
+      previousTrackingNumber
+    ) {
+      donation.fulfillmentStatusHistory.push({
+        previousStatus: previousFulfillmentStatus,
+        status: "pending",
+        previousTrackingNumber,
+        courierTrackingNumber: "",
+        updatedBy: String(req.adminId || "unknown"),
+      });
+      donation.fulfillmentStatus = "pending";
+      donation.courierTrackingNumber = "";
+      donation.fulfillmentUpdatedAt = new Date();
+      donation.fulfillmentUpdatedBy = String(req.adminId || "unknown");
+    }
 
     await donation.save();
     await donation.populate(

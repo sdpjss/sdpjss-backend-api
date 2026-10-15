@@ -18,6 +18,22 @@ const deliveryAddressSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const fulfillmentStatusHistorySchema = new mongoose.Schema(
+  {
+    previousStatus: String,
+    status: {
+      type: String,
+      enum: ["pending", "ready", "dispatched", "fulfilled"],
+      required: true,
+    },
+    previousTrackingNumber: String,
+    courierTrackingNumber: String,
+    updatedBy: { type: String, required: true },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const guestDonationSchema = new mongoose.Schema(
   {
     guestId: {
@@ -94,6 +110,18 @@ const guestDonationSchema = new mongoose.Schema(
         enum: ["none", "halwa", "packet"],
         default: undefined,
       },
+    },
+    fulfillmentStatus: {
+      type: String,
+      enum: ["pending", "ready", "dispatched", "fulfilled"],
+      default: "pending",
+    },
+    courierTrackingNumber: { type: String, trim: true, default: "" },
+    fulfillmentUpdatedAt: { type: Date },
+    fulfillmentUpdatedBy: { type: String },
+    fulfillmentStatusHistory: {
+      type: [fulfillmentStatusHistorySchema],
+      default: [],
     },
     paymentStatus: {
       type: String,
