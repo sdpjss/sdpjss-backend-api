@@ -48,6 +48,22 @@ const donationCorrectionSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const fulfillmentStatusHistorySchema = new mongoose.Schema(
+  {
+    previousStatus: String,
+    status: {
+      type: String,
+      enum: ["pending", "ready", "dispatched", "fulfilled"],
+      required: true,
+    },
+    previousTrackingNumber: String,
+    courierTrackingNumber: String,
+    updatedBy: { type: String, required: true },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const donationSchema = new mongoose.Schema(
   {
     userId: {
@@ -116,6 +132,18 @@ const donationSchema = new mongoose.Schema(
         enum: ["none", "halwa", "packet", "mixed"],
         default: undefined,
       },
+    },
+    fulfillmentStatus: {
+      type: String,
+      enum: ["pending", "ready", "dispatched", "fulfilled"],
+      default: "pending",
+    },
+    courierTrackingNumber: { type: String, trim: true, default: "" },
+    fulfillmentUpdatedAt: { type: Date },
+    fulfillmentUpdatedBy: { type: String },
+    fulfillmentStatusHistory: {
+      type: [fulfillmentStatusHistorySchema],
+      default: [],
     },
     calculationVersion: {
       type: String,

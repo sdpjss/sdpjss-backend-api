@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import migrateDonationCategoryRates from "../migrations/migrateDonationCategoryRates.js";
 import migrateCourierChargeAmounts from "../migrations/migrateCourierChargeAmounts.js";
 import ensureMaaDurgaPratimaCategory from "../migrations/ensureMaaDurgaPratimaCategory.js";
+import ensureMahaprasadFulfillmentFeature from "../migrations/ensureMahaprasadFulfillmentFeature.js";
 
 const connectDB = async () => {
   mongoose.connection.on("connected", () => console.log("Database Connected"));
@@ -10,6 +11,7 @@ const connectDB = async () => {
   await migrateDonationCategoryRates();
   await migrateCourierChargeAmounts();
   await ensureMaaDurgaPratimaCategory();
+  await ensureMahaprasadFulfillmentFeature();
 };
 
 export default connectDB;
