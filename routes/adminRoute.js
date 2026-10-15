@@ -84,6 +84,7 @@ import {
   updateMahaprasadFulfillmentStatus,
 } from "../controllers/fulfillmentController.js";
 import {
+  getRazorpaySettlementExport,
   getRazorpaySettlements,
   synchronizeRazorpaySettlements,
 } from "../controllers/settlementController.js";
@@ -136,6 +137,11 @@ adminRouter.get(
   "/razorpay-settlements",
   authAdmin,
   getRazorpaySettlements
+);
+adminRouter.get(
+  "/razorpay-settlements/export",
+  authAdmin,
+  getRazorpaySettlementExport
 );
 adminRouter.post(
   "/razorpay-settlements/sync",
