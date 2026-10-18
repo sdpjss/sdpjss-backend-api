@@ -286,7 +286,7 @@ const getRazorpaySettlementExport = async (req, res) => {
       ? await donationModel
           .find({ _id: { $in: donationIds } })
           .select(
-            "receiptId transactionId date createdAt list userId relationName"
+            "receiptId transactionId date createdAt list courierCharge userId relationName"
           )
           .populate("userId", "fullname fatherName contact")
           .lean()
@@ -310,7 +310,17 @@ const getRazorpaySettlementExport = async (req, res) => {
 
       const mobileCode = donation.userId?.contact?.mobileno?.code || "";
       const mobileNumber = donation.userId?.contact?.mobileno?.number || "";
-      const categories = donation.list?.length ? donation.list : [null];
+      const categories = Array.isArray(donation.list)
+        ? [...donation.list]
+        : [];
+      const courierCharge = toNumber(donation.courierCharge);
+      if (courierCharge > 0) {
+        categories.push({
+          category: "Courier Charge",
+          amount: courierCharge,
+        });
+      }
+      if (!categories.length) categories.push(null);
 
       categories.forEach((category) => {
         rows.push({
