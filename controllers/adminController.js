@@ -2396,7 +2396,13 @@ const profileAddressForRegisteredUser = (address) => {
 
 const getOnlineCourierAddresses = async (req, res) => {
   try {
-    const { year, location = "all", donorType = "all" } = req.query;
+    const {
+      year,
+      location = "all",
+      country = "all",
+      state = "all",
+      donorType = "all",
+    } = req.query;
 
     // 1. Date range setup (remains the same)
     const targetYear = year ? parseInt(year) : new Date().getFullYear();
@@ -2456,28 +2462,81 @@ const getOnlineCourierAddresses = async (req, res) => {
       allDonations.push(...formattedGuest);
     }*/
 
-    // 3. Filter by location (In India / Outside India)
-    const filteredByLocation = allDonations.filter((donation) => {
-      if (!donation.user || !donation.user.address) return false;
-      const country = (donation.user.address.country || "").toLowerCase();
-      if (location === "in_india") return country === "india";
-      if (location === "outside_india") return country !== "india";
-      return true;
-    });
+    const getStructuredAddress = (donation) => {
+      const deliveryAddress = donation.deliveryAddress || {};
+      if (
+        deliveryAddress.currlocation ||
+        deliveryAddress.country ||
+        deliveryAddress.state
+      ) {
+        return deliveryAddress;
+      }
+      return donation.user?.address || {};
+    };
+    const getLocationGroup = (address) => {
+      const countryName = String(address.country || "").trim().toLowerCase();
+      if (address.currlocation === "outside_india") return "outside_india";
+      if (countryName && countryName !== "india") return "outside_india";
+      return "in_india";
+    };
+    const getCountryName = (address) => {
+      const configuredCountry = String(address.country || "").trim();
+      if (configuredCountry) return configuredCountry;
+      return getLocationGroup(address) === "in_india"
+        ? "India"
+        : "Not specified";
+    };
+    const getStateName = (address) =>
+      String(address.state || "").trim() || "Not specified";
+    const matchesFilter = (value, selectedValue) =>
+      selectedValue === "all" ||
+      value.toLowerCase() === String(selectedValue).trim().toLowerCase();
 
-    // 4. *** NEW *** Filter out local Gaya/Bihar addresses
-    const filteredDonations = filteredByLocation.filter((donation) => {
+    // Exclude local Gaya/Bihar addresses because courier labels are not needed.
+    const courierDonations = allDonations.filter((donation) => {
       const addressString = (donation.postalAddress || "").toLowerCase();
       const hasGaya = addressString.includes("gaya");
       const hasBihar = addressString.includes("bihar");
-      // Keep the donation ONLY IF it does not contain BOTH "gaya" and "bihar"
-      return !(hasGaya && hasBihar);
+      const hasPrasad =
+        donation.totalPackets > 0 || donation.totalWeightInGrams > 0;
+      return hasPrasad && !(hasGaya && hasBihar);
     });
 
+    const locationFilteredDonations = courierDonations.filter((donation) => {
+      const address = getStructuredAddress(donation);
+      return (
+        location === "all" || getLocationGroup(address) === location
+      );
+    });
+    const availableCountries = [
+      ...new Set(
+        locationFilteredDonations.map((donation) =>
+          getCountryName(getStructuredAddress(donation))
+        )
+      ),
+    ].sort((first, second) => first.localeCompare(second));
+    const countryFilteredDonations = locationFilteredDonations.filter(
+      (donation) =>
+        matchesFilter(
+          getCountryName(getStructuredAddress(donation)),
+          country
+        )
+    );
+    const availableStates = [
+      ...new Set(
+        countryFilteredDonations.map((donation) =>
+          getStateName(getStructuredAddress(donation))
+        )
+      ),
+    ].sort((first, second) => first.localeCompare(second));
+    const filteredDonations = countryFilteredDonations.filter((donation) =>
+      matchesFilter(getStateName(getStructuredAddress(donation)), state)
+    );
+
     // 5. Format the addresses for the final response (remains the same)
-    const formattedAddresses = filteredDonations
-      .filter(d => d.totalPackets > 0 || d.totalWeightInGrams > 0) // Only include donations with prasad
-      .map((d) => ({
+    const formattedAddresses = filteredDonations.map((d) => {
+      const structuredAddress = getStructuredAddress(d);
+      return {
         id: d._id,
         receiptId: d.receiptId,
         toName: d.user?.fullname || "N/A",
@@ -2487,13 +2546,21 @@ const getOnlineCourierAddresses = async (req, res) => {
           : "N/A",
         donationDate: d.createdAt,
         donorType: d.donorType,
-    }));
+        location: getLocationGroup(structuredAddress),
+        country: getCountryName(structuredAddress),
+        state: getStateName(structuredAddress),
+      };
+    });
 
     // 7. Send the response
     res.json({
       success: true,
       addresses: formattedAddresses,
       count: formattedAddresses.length,
+      filters: {
+        countries: availableCountries,
+        states: availableStates,
+      },
     });
   } catch (error) {
     console.error("Error fetching courier addresses:", error);
